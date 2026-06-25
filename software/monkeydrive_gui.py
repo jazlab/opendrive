@@ -32,6 +32,11 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def format_mm(value: float) -> str:
+    """Format a millimeter value to nearest micron."""
+    return f"{value:.3f}"
+
+
 # =============================================================================
 # Configuration Constants
 # =============================================================================
@@ -71,6 +76,12 @@ class Config:
     MODE_STEP: str = "step"
     DEFAULT_STEP_SPEED: float = 0.01
     DEFAULT_STEP_SIZE: float = 0.05
+    SPEED_KEY_INCREMENT: float = 0.001
+    STEP_SPEED_KEY_INCREMENT: float = 0.01
+    TARGET_KEY_INCREMENT: float = 0.1
+    STEP_SIZE_KEY_INCREMENT: float = 0.01
+    STEP_JOG_HOLD_DELAY_MS: int = 300
+    STEP_KEY_RELEASE_DEBOUNCE_MS: int = 100
     COLOR_BG: str = "#f0f0f0"
     COLOR_FG: str = "#000000"
     COLOR_ENTRY_BG: str = "#ffffff"
@@ -505,7 +516,7 @@ class SettingsWindow(tk.Toplevel):
 
         self._min_speed_var = tk.StringVar(value=f"{min_speed:g}")
         self._max_speed_var = tk.StringVar(value=f"{max_speed:g}")
-        self._backlash_var = tk.StringVar(value=f"{backlash:g}")
+        self._backlash_var = tk.StringVar(value=format_mm(backlash))
 
         fields = [
             ("Minimum speed (mm/s):", self._min_speed_var),
@@ -545,6 +556,8 @@ class SettingsWindow(tk.Toplevel):
             messagebox.showwarning("Invalid Input", "Backlash must be 0 or greater.", parent=self)
             return
 
+        backlash = round(backlash, 3)
+        self._backlash_var.set(format_mm(backlash))
         self._on_save(min_speed, max_speed, backlash)
         self.destroy()
 
@@ -572,6 +585,12 @@ class MonkeyDriveApp:
         self._min_speed: float = Config.MIN_SPEED
         self._max_speed: float = Config.MAX_SPEED
         self._backlash: float = Config.DEFAULT_BACKLASH_MM
+        self._step_targets: dict = {}
+        self._active_step_key: Optional[str] = None
+        self._active_step_direction: int = 0
+        self._step_key_is_jogging: bool = False
+        self._step_key_hold_job = None
+        self._step_key_release_job = None
 
         # Serial manager
         self._serial_manager = SerialManager(
@@ -586,6 +605,8 @@ class MonkeyDriveApp:
         self._mode_var: Optional[tk.StringVar] = None
         self._step_speed_var: Optional[tk.StringVar] = None
         self._step_size_var: Optional[tk.StringVar] = None
+        self._step_speed_entry: Optional[tk.Entry] = None
+        self._step_size_entry: Optional[tk.Entry] = None
         self._target_controls_frame: Optional[tk.Frame] = None
         self._step_controls_frame: Optional[tk.Frame] = None
         self._step_settings_frame: Optional[tk.Frame] = None
@@ -597,6 +618,7 @@ class MonkeyDriveApp:
 
         # Build UI
         self._build_ui()
+        self._bind_step_mode_shortcuts()
 
         # Ensure at least one motor
         if len(self._motor_states) == 0:
@@ -801,19 +823,38 @@ class MonkeyDriveApp:
         self._step_settings_frame.pack(pady=(0, 10))
 
         self._step_speed_var = tk.StringVar(value=f"{self._saved_step_speed:g}")
-        self._step_size_var = tk.StringVar(value=f"{self._saved_step_size:g}")
+        self._step_size_var = tk.StringVar(value=format_mm(self._saved_step_size))
 
         tk.Label(self._step_settings_frame, text="Step speed (mm/s):").pack(side=tk.LEFT, padx=(0, 5))
-        tk.Entry(
+        step_speed_entry = tk.Entry(
             self._step_settings_frame, textvariable=self._step_speed_var,
-            width=Config.ENTRY_WIDTH
-        ).pack(side=tk.LEFT, padx=(0, 15))
+            width=Config.ENTRY_WIDTH, state='readonly',
+            readonlybackground=Config.COLOR_ENTRY_BG
+        )
+        self._step_speed_entry = step_speed_entry
+        step_speed_entry.pack(side=tk.LEFT, padx=(0, 15))
+        step_speed_entry.bind('<Double-Button-1>', lambda e: self._enable_step_setting_edit('speed'))
+        self._bind_numeric_stepper(
+            step_speed_entry, self._step_speed_var,
+            Config.STEP_SPEED_KEY_INCREMENT, decimals=3,
+            min_value=lambda: self._min_speed,
+            max_value=lambda: self._max_speed
+        )
 
         tk.Label(self._step_settings_frame, text="Step size (mm):").pack(side=tk.LEFT, padx=(0, 5))
-        tk.Entry(
+        step_size_entry = tk.Entry(
             self._step_settings_frame, textvariable=self._step_size_var,
-            width=Config.ENTRY_WIDTH
-        ).pack(side=tk.LEFT)
+            width=Config.ENTRY_WIDTH, state='readonly',
+            readonlybackground=Config.COLOR_ENTRY_BG
+        )
+        self._step_size_entry = step_size_entry
+        step_size_entry.pack(side=tk.LEFT)
+        step_size_entry.bind('<Double-Button-1>', lambda e: self._enable_step_setting_edit('size'))
+        self._bind_numeric_stepper(
+            step_size_entry, self._step_size_var,
+            Config.STEP_SIZE_KEY_INCREMENT, decimals=3,
+            min_value=Config.STEP_SIZE_KEY_INCREMENT
+        )
 
         self._target_controls_frame = tk.Frame(parent)
         self._target_controls_frame.pack(pady=(0, 15))
@@ -933,21 +974,37 @@ class MonkeyDriveApp:
             widgets['speed_entry'].grid(row=row_index, column=1, sticky='ew', padx=5, pady=Config.ROW_PAD_Y)
             widgets['speed_entry'].bind('<KeyRelease>', lambda e, mid=state.motor_id: self._on_speed_change(mid))
             widgets['speed_entry'].bind('<FocusOut>', lambda e, mid=state.motor_id: self._on_speed_change(mid))
+            self._bind_numeric_stepper(
+                widgets['speed_entry'], widgets['speed_var'],
+                Config.SPEED_KEY_INCREMENT, decimals=3,
+                min_value=lambda: self._min_speed,
+                max_value=lambda: self._max_speed,
+                on_change=lambda mid=state.motor_id: self._on_speed_change(mid)
+            )
+            self._bind_vertical_tab(widgets['speed_entry'], state.motor_id, 'speed_entry')
             visible_widgets.append(widgets['speed_entry'])
 
             # Col 2: Target entry
-            widgets['target_var'] = tk.StringVar(value=f"{state.target}" if state.target else "")
+            widgets['target_var'] = tk.StringVar(value=format_mm(state.target) if state.target else "")
             widgets['target_entry'] = tk.Entry(
                 self._motors_container, textvariable=widgets['target_var'],
                 width=Config.ENTRY_WIDTH
             )
             widgets['target_entry'].grid(row=row_index, column=2, sticky='ew', padx=5, pady=Config.ROW_PAD_Y)
             widgets['target_entry'].bind('<KeyRelease>', lambda e, mid=state.motor_id: self._on_target_change(mid))
-            widgets['target_entry'].bind('<FocusOut>', lambda e, mid=state.motor_id: self._on_target_change(mid))
+            widgets['target_entry'].bind('<FocusOut>', lambda e, mid=state.motor_id: self._on_target_focus_out(mid))
+            self._bind_numeric_stepper(
+                widgets['target_entry'], widgets['target_var'],
+                Config.TARGET_KEY_INCREMENT, decimals=3,
+                min_value=Config.MIN_TARGET_POS,
+                max_value=Config.MAX_TARGET_POS,
+                on_change=lambda mid=state.motor_id: self._on_target_change(mid)
+            )
+            self._bind_vertical_tab(widgets['target_entry'], state.motor_id, 'target_entry')
             visible_widgets.append(widgets['target_entry'])
 
         # Absolute position
-        widgets['absolute_var'] = tk.StringVar(value=f"{state.absolute:.3f}")
+        widgets['absolute_var'] = tk.StringVar(value=format_mm(state.absolute))
         widgets['absolute_entry'] = tk.Entry(
             self._motors_container, textvariable=widgets['absolute_var'],
             width=Config.ENTRY_WIDTH, state='readonly',
@@ -957,7 +1014,7 @@ class MonkeyDriveApp:
         widgets['absolute_entry'].bind('<Double-Button-1>', lambda e, mid=state.motor_id: self._enable_absolute_edit(mid))
 
         # Relative position
-        widgets['relative_var'] = tk.StringVar(value=f"{state.relative:.3f}")
+        widgets['relative_var'] = tk.StringVar(value=format_mm(state.relative))
         widgets['relative_entry'] = tk.Entry(
             self._motors_container, textvariable=widgets['relative_var'],
             width=Config.ENTRY_WIDTH, state='readonly',
@@ -1042,6 +1099,333 @@ class MonkeyDriveApp:
         else:
             frame.pack(**pack_options)
 
+    def _bind_numeric_stepper(self, entry: tk.Entry, variable: tk.StringVar,
+                              increment: float, decimals: int,
+                              min_value=None, max_value=None,
+                              on_change: Callable = None):
+        """Bind Up/Down keys to increment a numeric entry."""
+        entry.bind(
+            '<Up>',
+            lambda event: self._adjust_numeric_entry(
+                variable, increment, decimals, min_value, max_value, on_change
+            )
+        )
+        entry.bind(
+            '<Down>',
+            lambda event: self._adjust_numeric_entry(
+                variable, -increment, decimals, min_value, max_value, on_change
+            )
+        )
+
+    def _adjust_numeric_entry(self, variable: tk.StringVar, delta: float,
+                              decimals: int, min_value=None, max_value=None,
+                              on_change: Callable = None):
+        """Adjust a numeric entry value and keep focus in the edited field."""
+        try:
+            value = float(variable.get())
+        except ValueError:
+            value = 0.0
+
+        value += delta
+
+        if callable(min_value):
+            min_value = min_value()
+        if callable(max_value):
+            max_value = max_value()
+
+        if min_value is not None and value < min_value:
+            value = min_value
+        if max_value is not None and value > max_value:
+            value = max_value
+
+        variable.set(f"{value:.{decimals}f}")
+        if on_change:
+            on_change()
+        return "break"
+
+    def _bind_vertical_tab(self, entry: tk.Entry, motor_id: int, widget_key: str):
+        """Bind Tab and Shift-Tab to move vertically within a table column."""
+        entry.bind(
+            '<Tab>',
+            lambda event: self._focus_vertical_entry(motor_id, widget_key, direction=1)
+        )
+        entry.bind(
+            '<Shift-Tab>',
+            lambda event: self._focus_vertical_entry(motor_id, widget_key, direction=-1)
+        )
+
+    def _focus_vertical_entry(self, motor_id: int, widget_key: str, direction: int):
+        """Move focus vertically, then horizontally at column boundaries."""
+        next_id = motor_id + direction
+
+        while 1 <= next_id <= len(self._motor_widgets):
+            widgets = self._get_widgets(next_id)
+            if widgets and widget_key in widgets:
+                widgets[widget_key].focus_set()
+                widgets[widget_key].select_range(0, tk.END)
+                return "break"
+            next_id += direction
+
+        columns = ['speed_entry', 'target_entry']
+        try:
+            column_index = columns.index(widget_key)
+        except ValueError:
+            return "break"
+
+        next_column_index = column_index + direction
+        if next_column_index < 0 or next_column_index >= len(columns):
+            next_column_index %= len(columns)
+
+        next_widget_key = columns[next_column_index]
+        next_id = 1 if direction > 0 else len(self._motor_widgets)
+
+        while 1 <= next_id <= len(self._motor_widgets):
+            widgets = self._get_widgets(next_id)
+            if widgets and next_widget_key in widgets:
+                widgets[next_widget_key].focus_set()
+                widgets[next_widget_key].select_range(0, tk.END)
+                return "break"
+            next_id += direction
+
+        return "break"
+
+    def _bind_step_mode_shortcuts(self):
+        """Bind keyboard shortcuts used in step mode."""
+        self._root.bind_all('<KeyPress>', self._on_keypress)
+        self._root.bind_all('<KeyRelease>', self._on_keyrelease)
+
+    def _on_keypress(self, event):
+        """Handle step-mode keyboard shortcuts."""
+        if not self._is_step_mode():
+            return None
+
+        widget = self._event_widget(event)
+        if widget and widget.winfo_toplevel() != self._root:
+            return None
+
+        if widget and self._is_editable_text_widget(widget):
+            return None
+
+        if self._is_step_down_key(event):
+            return self._handle_step_keypress("down", direction=1)
+
+        if self._is_step_up_key(event):
+            return self._handle_step_keypress("up", direction=-1)
+
+        digit = self._shortcut_digit(event)
+        if digit is None:
+            return None
+
+        self._select_only_motor(digit)
+        return "break"
+
+    def _on_keyrelease(self, event):
+        """Stop step-mode jog motion when a step shortcut key is released."""
+        if not self._is_step_mode():
+            return None
+
+        widget = self._event_widget(event)
+        if widget and widget.winfo_toplevel() != self._root:
+            return None
+
+        if widget and self._is_editable_text_widget(widget):
+            return None
+
+        if self._is_step_down_key(event):
+            return self._handle_step_keyrelease("down")
+
+        if self._is_step_up_key(event):
+            return self._handle_step_keyrelease("up")
+
+        return None
+
+    def _handle_step_keypress(self, key_name: str, direction: int):
+        """Handle initial step shortcut press and ignore key-repeat repeats."""
+        self._cancel_step_key_release_job()
+
+        if self._active_step_key == key_name:
+            return "break"
+
+        self._reset_step_key_state()
+        self._active_step_key = key_name
+        self._active_step_direction = direction
+        self._on_step(direction=direction)
+        self._step_key_hold_job = self._root.after(
+            Config.STEP_JOG_HOLD_DELAY_MS, self._start_step_jog
+        )
+        return "break"
+
+    def _handle_step_keyrelease(self, key_name: str):
+        """Handle release of a step shortcut key."""
+        if self._active_step_key != key_name:
+            return "break"
+
+        self._cancel_step_key_release_job()
+        self._step_key_release_job = self._root.after(
+            Config.STEP_KEY_RELEASE_DEBOUNCE_MS, self._finish_step_keyrelease
+        )
+        return "break"
+
+    def _finish_step_keyrelease(self):
+        """Finish a step shortcut release after key-repeat debounce."""
+        self._step_key_release_job = None
+        self._cancel_step_key_hold_job()
+        if self._step_key_is_jogging:
+            self._pause_selected_step_motors()
+        self._active_step_key = None
+        self._active_step_direction = 0
+        self._step_key_is_jogging = False
+
+    def _start_step_jog(self):
+        """Convert a held step shortcut into continuous jog motion."""
+        self._step_key_hold_job = None
+        if not self._active_step_key or self._active_step_direction == 0:
+            return
+
+        if not self._serial_manager.is_connected:
+            return
+
+        selected = self._selected_states()
+        if not selected or not self._validate_absolute_edits_closed(selected):
+            return
+
+        step_settings = self._parse_step_settings()
+        if not step_settings:
+            return
+
+        speed, _ = step_settings
+        target = Config.MAX_TARGET_POS if self._active_step_direction > 0 else Config.MIN_TARGET_POS
+
+        for state in selected:
+            state.speed = speed
+            state.target = target
+            self._step_targets.pop(state.motor_id, None)
+            cmd = SerialProtocol.cmd_run(state.motor_id, speed, target, state.absolute)
+            self._serial_manager.send(cmd)
+            state.is_running = True
+
+        self._step_key_is_jogging = True
+        self._focus_main_window()
+
+    def _cancel_step_key_release_job(self):
+        """Cancel a pending jog stop."""
+        if self._step_key_release_job is not None:
+            self._root.after_cancel(self._step_key_release_job)
+            self._step_key_release_job = None
+
+    def _cancel_step_key_hold_job(self):
+        """Cancel a pending transition from single-step to jog."""
+        if self._step_key_hold_job is not None:
+            self._root.after_cancel(self._step_key_hold_job)
+            self._step_key_hold_job = None
+
+    def _is_step_down_key(self, event) -> bool:
+        """Return True for keys that trigger Step Down."""
+        return event.keysym in ('KP_Add', 'plus', 'equal')
+
+    def _is_step_up_key(self, event) -> bool:
+        """Return True for keys that trigger Step Up."""
+        return event.keysym in ('KP_Subtract', 'minus', 'underscore')
+
+    def _pause_selected_step_motors(self):
+        """Pause selected motors after releasing a step shortcut."""
+        if not self._serial_manager.is_connected:
+            return
+
+        for state in self._selected_states():
+            if state.is_running:
+                self._serial_manager.send(SerialProtocol.cmd_pause(state.motor_id))
+                state.is_running = False
+            self._step_targets.pop(state.motor_id, None)
+
+        self._focus_main_window()
+
+    def _reset_step_key_state(self):
+        """Clear step shortcut repeat state."""
+        self._cancel_step_key_release_job()
+        self._cancel_step_key_hold_job()
+        self._active_step_key = None
+        self._active_step_direction = 0
+        self._step_key_is_jogging = False
+
+    def _event_widget(self, event):
+        """Return the Tk widget object for an event."""
+        if isinstance(event.widget, str):
+            try:
+                return self._root.nametowidget(event.widget)
+            except KeyError:
+                return None
+        return event.widget
+
+    def _focus_main_window(self):
+        """Return keyboard focus to the main application window."""
+        self._root.after_idle(self._root.focus_force)
+
+    def _is_editable_text_widget(self, widget) -> bool:
+        """Return True when a keypress should be treated as text input."""
+        if isinstance(widget, tk.Text):
+            return True
+        if isinstance(widget, tk.Entry):
+            try:
+                return widget.cget('state') != 'readonly'
+            except tk.TclError:
+                return True
+        return False
+
+    def _shortcut_digit(self, event) -> Optional[int]:
+        """Return a motor shortcut digit for normal or keypad number keys."""
+        key = event.keysym
+        if key.startswith('KP_'):
+            key = key[3:]
+        if key.isdigit():
+            digit = int(key)
+            if 1 <= digit <= Config.MAX_MOTORS:
+                return digit
+        return None
+
+    def _select_only_motor(self, motor_id: int):
+        """Select one motor and deselect all others."""
+        if motor_id < 1 or motor_id > len(self._motor_states):
+            return
+
+        for state in self._motor_states:
+            state.is_selected = (state.motor_id == motor_id)
+            widgets = self._get_widgets(state.motor_id)
+            if widgets:
+                widgets['selected_var'].set(state.is_selected)
+
+    def _enable_step_setting_edit(self, setting: str):
+        """Enable editing for a step setting field."""
+        entry = self._step_speed_entry if setting == 'speed' else self._step_size_entry
+        if not entry:
+            return
+
+        entry.config(state='normal', background=Config.COLOR_ENTRY_BG)
+        entry.focus_set()
+        entry.select_range(0, tk.END)
+        entry.bind('<Return>', lambda e, s=setting: self._confirm_step_setting_edit(s))
+        entry.bind('<FocusOut>', lambda e, s=setting: self._confirm_step_setting_edit(s))
+
+    def _confirm_step_setting_edit(self, setting: str):
+        """Validate and lock a step setting field after editing."""
+        entry = self._step_speed_entry if setting == 'speed' else self._step_size_entry
+        variable = self._step_speed_var if setting == 'speed' else self._step_size_var
+        if not entry or not variable or entry['state'] == 'readonly':
+            return
+
+        try:
+            value = float(variable.get())
+            if setting == 'speed':
+                value = min(max(value, self._min_speed), self._max_speed)
+            elif value < Config.STEP_SIZE_KEY_INCREMENT:
+                value = Config.STEP_SIZE_KEY_INCREMENT
+        except ValueError:
+            value = self._min_speed if setting == 'speed' else Config.STEP_SIZE_KEY_INCREMENT
+
+        variable.set(f"{value:.3f}")
+        entry.config(state='readonly', readonlybackground=Config.COLOR_ENTRY_BG)
+        self._root.focus_set()
+
     def _get_widgets(self, motor_id: int) -> Optional[dict]:
         """Get widget dictionary for motor by ID."""
         idx = motor_id - 1
@@ -1098,6 +1482,8 @@ class MonkeyDriveApp:
             self._safe_popup(messagebox.showwarning, "Invalid Input", "Step size must be greater than 0mm.")
             return None
 
+        step_size = round(step_size, 3)
+        self._step_size_var.set(format_mm(step_size))
         return speed, step_size
 
     def _send_settings_to_controller(self):
@@ -1195,9 +1581,17 @@ class MonkeyDriveApp:
         if state and widgets:
             try:
                 new_target = float(widgets['target_var'].get())
-                state.target = new_target
+                state.target = round(new_target, 3)
             except ValueError:
                 pass
+
+    def _on_target_focus_out(self, motor_id: int):
+        """Handle target input confirmation."""
+        self._on_target_change(motor_id)
+        state = self._get_state(motor_id)
+        widgets = self._get_widgets(motor_id)
+        if state and widgets:
+            widgets['target_var'].set(format_mm(state.target) if state.target else "")
 
     def _enable_absolute_edit(self, motor_id: int):
         """Enable editing of absolute position field."""
@@ -1231,10 +1625,11 @@ class MonkeyDriveApp:
         try:
             value = float(widgets['absolute_var'].get())
             if Config.MIN_ABSOLUTE_POS <= value <= Config.MAX_ABSOLUTE_POS:
-                state.absolute = value
+                state.absolute = round(value, 3)
                 # Reset relative position to 0 and set new zero point
                 state.relative = 0.0
-                state.relative_zero_point = value
+                state.relative_zero_point = state.absolute
+                widgets['absolute_var'].set(format_mm(state.absolute))
                 widgets['relative_var'].set("0.000")
             else:
                 raise ValueError("Position out of range")
@@ -1244,7 +1639,7 @@ class MonkeyDriveApp:
                 f"Absolute position must be between {Config.MIN_ABSOLUTE_POS}mm and "
                 f"{Config.MAX_ABSOLUTE_POS}mm. See Motor {motor_id}."
             )
-            widgets['absolute_var'].set(f"{state.absolute:.3f}")
+            widgets['absolute_var'].set(format_mm(state.absolute))
 
         entry.config(state='readonly', readonlybackground='lightgray')
 
@@ -1272,10 +1667,12 @@ class MonkeyDriveApp:
 
         try:
             value = float(widgets['relative_var'].get())
-            state.relative = value
-            state.relative_zero_point = state.absolute - value
+            state.relative = round(value, 3)
+            state.relative_zero_point = state.absolute - state.relative
         except ValueError:
-            widgets['relative_var'].set(f"{state.relative:.3f}")
+            widgets['relative_var'].set(format_mm(state.relative))
+
+        widgets['relative_var'].set(format_mm(state.relative))
 
         entry.config(state='readonly', readonlybackground='lightgray')
 
@@ -1322,24 +1719,31 @@ class MonkeyDriveApp:
 
         if self._serial_manager.is_connected:
             # Pause all running motors before disconnecting
+            self._reset_step_key_state()
             for state in self._motor_states:
                 if state.is_running:
                     self._serial_manager.send(SerialProtocol.cmd_pause(state.motor_id))
                     state.is_running = False
             self._serial_manager.disconnect()
+            self._step_targets.clear()
             self._connect_btn.config(text="Connect")
+            self._focus_main_window()
         else:
             if self._serial_manager.connect(port):
                 self._send_settings_to_controller()
                 self._connect_btn.config(text="Disconnect")
                 messagebox.showinfo("Connected", f"Connected to {port}")
+                self._focus_main_window()
             else:
                 messagebox.showerror("Connection Failed", f"Could not connect to {port}")
+                self._focus_main_window()
 
     def _on_connection_lost(self):
         """Handle connection lost callback from serial manager."""
+        self._reset_step_key_state()
         for state in self._motor_states:
             state.is_running = False
+        self._step_targets.clear()
         self._root.after(0, self._show_connection_lost_dialog)
 
     def _show_connection_lost_dialog(self):
@@ -1378,6 +1782,7 @@ class MonkeyDriveApp:
         last_state = self._motor_states[-1]
         if last_state.is_running:
             self._serial_manager.send(SerialProtocol.cmd_pause(last_state.motor_id))
+        self._step_targets.pop(last_state.motor_id, None)
 
         self._motor_states.pop()
         self._rebuild_motor_rows()
@@ -1420,7 +1825,8 @@ class MonkeyDriveApp:
             # Validate Target Input
             try:
                 t_val = float(widgets['target_var'].get())
-                state.target = t_val
+                state.target = round(t_val, 3)
+                widgets['target_var'].set(format_mm(state.target) if state.target else "")
             except ValueError:
                 self._safe_popup(
                     messagebox.showwarning, "Invalid Input",
@@ -1483,7 +1889,7 @@ class MonkeyDriveApp:
         target_updates = []
 
         for state in selected:
-            target = state.absolute + (direction * step_size)
+            target = round(state.absolute + (direction * step_size), 3)
             if not (Config.MIN_TARGET_POS <= target <= Config.MAX_TARGET_POS):
                 self._safe_popup(
                     messagebox.showwarning, "Invalid Step",
@@ -1496,16 +1902,21 @@ class MonkeyDriveApp:
         for state, target in target_updates:
             state.speed = speed
             state.target = target
+            self._step_targets.pop(state.motor_id, None)
             cmd = SerialProtocol.cmd_run(state.motor_id, speed, target, state.absolute)
             self._serial_manager.send(cmd)
             state.is_running = True
 
+        self._focus_main_window()
+
     def _on_pause(self):
         """Handle Pause button click."""
+        self._reset_step_key_state()
         selected = [s for s in self._motor_states if s.is_selected and s.is_running]
         for state in selected:
             self._serial_manager.send(SerialProtocol.cmd_pause(state.motor_id))
             state.is_running = False
+            self._step_targets.pop(state.motor_id, None)
 
     def _on_zero(self):
         """Zero relative position for selected motors."""
@@ -1584,6 +1995,7 @@ class MonkeyDriveApp:
         for state in selected:
             if state.is_running:
                 self._serial_manager.send(SerialProtocol.cmd_pause(state.motor_id))
+            self._step_targets.pop(state.motor_id, None)
 
         # Clear values for selected motors
         for state in selected:
@@ -1615,8 +2027,10 @@ class MonkeyDriveApp:
         """Handle position update from serial manager."""
         state = self._get_state(motor_id)
         if state:
-            state.absolute = absolute
-            state.relative = absolute - state.relative_zero_point
+            state.absolute = round(absolute, 3)
+            state.relative = round(state.absolute - state.relative_zero_point, 3)
+            if not state.is_running:
+                self._step_targets.pop(motor_id, None)
 
         self._root.after(0, lambda: self._update_position_display(motor_id, absolute))
 
@@ -1626,9 +2040,9 @@ class MonkeyDriveApp:
         widgets = self._get_widgets(motor_id)
         if state and widgets:
             if widgets['absolute_entry']['state'] == 'readonly':
-                widgets['absolute_var'].set(f"{state.absolute:.3f}")
+                widgets['absolute_var'].set(format_mm(state.absolute))
             if widgets['relative_entry']['state'] == 'readonly':
-                widgets['relative_var'].set(f"{state.relative:.3f}")
+                widgets['relative_var'].set(format_mm(state.relative))
 
     # -------------------------------------------------------------------------
     # State Persistence
@@ -1646,10 +2060,10 @@ class MonkeyDriveApp:
                 'port': self._port_var.get() if self._port_var else "",
                 'mode': self._mode_var.get() if self._mode_var else self._saved_mode,
                 'step_speed': self._step_speed_var.get() if self._step_speed_var else f"{self._saved_step_speed:g}",
-                'step_size': self._step_size_var.get() if self._step_size_var else f"{self._saved_step_size:g}",
+                'step_size': self._step_size_var.get() if self._step_size_var else format_mm(self._saved_step_size),
                 'min_speed': self._min_speed,
                 'max_speed': self._max_speed,
-                'backlash': self._backlash,
+                'backlash': round(self._backlash, 3),
             }
             with open(self._get_data_path(), 'w', encoding='utf-8') as f:
                 json.dump(data, f, indent=2)
@@ -1670,14 +2084,18 @@ class MonkeyDriveApp:
 
                 for state in self._motor_states:
                     state.is_running = False
+                    state.target = round(state.target, 3)
+                    state.absolute = round(state.absolute, 3)
+                    state.relative = round(state.relative, 3)
+                    state.relative_zero_point = round(state.relative_zero_point, 3)
 
                 mode = data.get('mode', Config.MODE_TARGET)
                 self._saved_mode = mode if mode in (Config.MODE_TARGET, Config.MODE_STEP) else Config.MODE_TARGET
                 self._saved_step_speed = float(data.get('step_speed', Config.DEFAULT_STEP_SPEED))
-                self._saved_step_size = float(data.get('step_size', Config.DEFAULT_STEP_SIZE))
+                self._saved_step_size = round(float(data.get('step_size', Config.DEFAULT_STEP_SIZE)), 3)
                 self._min_speed = float(data.get('min_speed', Config.MIN_SPEED))
                 self._max_speed = float(data.get('max_speed', Config.MAX_SPEED))
-                self._backlash = float(data.get('backlash', Config.DEFAULT_BACKLASH_MM))
+                self._backlash = round(float(data.get('backlash', Config.DEFAULT_BACKLASH_MM)), 3)
 
                 if self._min_speed <= 0 or self._max_speed < self._min_speed or self._backlash < 0:
                     raise ValueError("Invalid persisted settings")
