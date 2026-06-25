@@ -66,6 +66,12 @@ class Config:
     WINDOW_TITLE: str = "MonkeyDrive"
     DECIMAL_PLACES: int = 3
     ENTRY_WIDTH: int = 12
+    COLOR_BG: str = "#f0f0f0"
+    COLOR_FG: str = "#000000"
+    COLOR_ENTRY_BG: str = "#ffffff"
+    COLOR_READONLY_BG: str = "#d9d9d9"
+    COLOR_ACTIVE_BG: str = "#e5e5e5"
+    COLOR_SELECT_BG: str = "#4a90e2"
 
     # Column Weights and Min Sizes for Grid Layout
     # Col 0: Buttons/ID | Col 1: Speed | Col 2: Target | Col 3: Abs | Col 4: Rel | Col 5: Notes
@@ -474,6 +480,7 @@ class MonkeyDriveApp:
         """Initialize the MonkeyDrive application."""
         self._root = tk.Tk()
         self._root.title(Config.WINDOW_TITLE)
+        self._configure_light_theme()
 
         # State
         self._motor_states: list = []
@@ -504,6 +511,8 @@ class MonkeyDriveApp:
         else:
             self._rebuild_motor_rows()
 
+        self._style_widget_tree()
+
         # Disable resizing after UI is built
         self._root.update_idletasks()
         self._root.resizable(False, False)
@@ -532,6 +541,91 @@ class MonkeyDriveApp:
     def run(self):
         """Start the main event loop."""
         self._root.mainloop()
+
+    def _configure_light_theme(self):
+        """Force readable colors on older macOS Tk builds."""
+        for option, value in (
+            ("*Background", Config.COLOR_BG),
+            ("*Foreground", Config.COLOR_FG),
+            ("*Entry.Background", Config.COLOR_ENTRY_BG),
+            ("*Entry.Foreground", Config.COLOR_FG),
+            ("*Text.Background", Config.COLOR_ENTRY_BG),
+            ("*Text.Foreground", Config.COLOR_FG),
+            ("*Button.Background", Config.COLOR_ENTRY_BG),
+            ("*Button.Foreground", Config.COLOR_FG),
+        ):
+            self._root.option_add(option, value)
+
+        self._root.tk_setPalette(
+            background=Config.COLOR_BG,
+            foreground=Config.COLOR_FG,
+            activeBackground=Config.COLOR_ACTIVE_BG,
+            activeForeground=Config.COLOR_FG,
+            highlightColor=Config.COLOR_SELECT_BG,
+            selectBackground=Config.COLOR_SELECT_BG,
+            selectForeground=Config.COLOR_ENTRY_BG,
+        )
+        self._root.configure(background=Config.COLOR_BG)
+
+        style = ttk.Style(self._root)
+        try:
+            style.theme_use("clam")
+        except tk.TclError:
+            pass
+        style.configure(
+            "TCombobox",
+            fieldbackground=Config.COLOR_ENTRY_BG,
+            background=Config.COLOR_ENTRY_BG,
+            foreground=Config.COLOR_FG,
+            selectbackground=Config.COLOR_SELECT_BG,
+            selectforeground=Config.COLOR_ENTRY_BG,
+        )
+
+    def _style_widget_tree(self, widget=None):
+        """Apply explicit colors to Tk widgets that may ignore the app palette."""
+        widget = widget or self._root
+
+        try:
+            if isinstance(widget, (tk.Tk, tk.Toplevel, tk.Frame)):
+                widget.configure(background=Config.COLOR_BG)
+            elif isinstance(widget, tk.Label):
+                widget.configure(background=Config.COLOR_BG, foreground=Config.COLOR_FG)
+            elif isinstance(widget, tk.Checkbutton):
+                widget.configure(
+                    background=Config.COLOR_BG,
+                    foreground=Config.COLOR_FG,
+                    activebackground=Config.COLOR_ACTIVE_BG,
+                    activeforeground=Config.COLOR_FG,
+                    selectcolor=Config.COLOR_ENTRY_BG,
+                )
+            elif isinstance(widget, tk.Button):
+                widget.configure(
+                    background=Config.COLOR_ENTRY_BG,
+                    foreground=Config.COLOR_FG,
+                    activebackground=Config.COLOR_ACTIVE_BG,
+                    activeforeground=Config.COLOR_FG,
+                    highlightbackground=Config.COLOR_BG,
+                )
+            elif isinstance(widget, tk.Entry):
+                readonly_bg = widget.cget("readonlybackground")
+                widget.configure(
+                    background=Config.COLOR_ENTRY_BG,
+                    foreground=Config.COLOR_FG,
+                    insertbackground=Config.COLOR_FG,
+                    readonlybackground=readonly_bg or Config.COLOR_READONLY_BG,
+                    disabledforeground=Config.COLOR_FG,
+                )
+            elif isinstance(widget, tk.Text):
+                widget.configure(
+                    background=Config.COLOR_ENTRY_BG,
+                    foreground=Config.COLOR_FG,
+                    insertbackground=Config.COLOR_FG,
+                )
+        except tk.TclError:
+            pass
+
+        for child in widget.winfo_children():
+            self._style_widget_tree(child)
 
     # -------------------------------------------------------------------------
     # UI Construction
@@ -727,6 +821,7 @@ class MonkeyDriveApp:
             widgets = self._create_motor_row(state, row_index=i + 1)
             self._motor_widgets.append(widgets)
 
+        self._style_widget_tree(self._motors_container)
         self._root.update_idletasks()
 
     # -------------------------------------------------------------------------

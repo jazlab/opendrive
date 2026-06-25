@@ -83,7 +83,7 @@ struct MotorState {
     int8_t direction;
     int8_t lastDirection;
     long stepsRemaining;
-    long backlashStepsRemaining;
+    long backlashPositionSteps;
     unsigned long stepIntervalUs;
     unsigned long lastStepTime;
     float currentSpeed;
@@ -98,7 +98,7 @@ struct MotorState {
         direction = 0;
         lastDirection = 0;
         stepsRemaining = 0;
-        backlashStepsRemaining = 0;
+        backlashPositionSteps = 0;
         stepIntervalUs = 0;
         lastStepTime = 0;
         currentSpeed = 0.0f;
@@ -190,6 +190,10 @@ bool anyMotorRunning() {
     return false;
 }
 
+long backlashEngagedPosition(int8_t direction) {
+    return (direction > 0) ? Config::BACKLASH_STEPS : 0;
+}
+
 // =============================================================================
 // Motor Control
 // =============================================================================
@@ -216,11 +220,12 @@ void startMotor(int idx, float speedMmS, float targetPosMm, float currentPosMm) 
     digitalWrite(Pins::DIR[idx], (newDir == 1) ? HIGH : LOW);
 
     long stepsNeeded = labs(distanceSteps);
-    long backlash = (m.lastDirection != 0 && newDir != m.lastDirection) ? Config::BACKLASH_STEPS : 0;
+    if (m.lastDirection == 0 && !m.isRunning) {
+        m.backlashPositionSteps = backlashEngagedPosition(newDir);
+    }
 
     m.direction = newDir;
     m.stepsRemaining = stepsNeeded;
-    m.backlashStepsRemaining = backlash;
     m.currentSpeed = Config::MIN_SPEED_MM_S;
     m.stepIntervalUs = static_cast<unsigned long>(1000000.0f / (m.currentSpeed * Config::STEPS_PER_MM));
     m.lastStepTime = micros();
@@ -251,7 +256,6 @@ void updateTarget(int idx, float newTargetMm) {
         digitalWrite(Pins::DIR[idx], (newDir == 1) ? HIGH : LOW);
         m.lastDirection = m.direction;
         m.direction = newDir;
-        m.backlashStepsRemaining = Config::BACKLASH_STEPS;
     }
 
     m.targetStepPosition = newTargetSteps;
@@ -264,7 +268,6 @@ void stopMotor(int idx) {
     
     m.isRunning = false;
     m.stepsRemaining = 0;
-    m.backlashStepsRemaining = 0;
     m.currentSpeed = 0.0f;
 
     sendPositionUpdate(idx + 1);
@@ -276,7 +279,6 @@ void stopAllMotors() {
         if (motors[i].isRunning) motors[i].lastDirection = motors[i].direction;
         motors[i].isRunning = false;
         motors[i].stepsRemaining = 0;
-        motors[i].backlashStepsRemaining = 0;
         motors[i].currentSpeed = 0.0f;
     }
     disableMotors();
@@ -313,9 +315,16 @@ void updateMotors() {
         digitalWrite(Pins::STEP[i], LOW);
         m.lastStepTime = now;
 
-        // Backlash compensation (no position change)
-        if (m.backlashStepsRemaining > 0) {
-            m.backlashStepsRemaining--;
+        // Backlash compensation changes only the internal slack state, not carriage position.
+        long engagedPosition = backlashEngagedPosition(m.direction);
+        if (m.backlashPositionSteps != engagedPosition) {
+            m.backlashPositionSteps += m.direction;
+            if (m.direction > 0 && m.backlashPositionSteps > engagedPosition) {
+                m.backlashPositionSteps = engagedPosition;
+            }
+            if (m.direction < 0 && m.backlashPositionSteps < engagedPosition) {
+                m.backlashPositionSteps = engagedPosition;
+            }
             continue;
         }
 
