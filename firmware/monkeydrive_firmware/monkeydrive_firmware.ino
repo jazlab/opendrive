@@ -26,11 +26,11 @@ namespace Config {
     constexpr float GEARHEAD_RATIO = 64.0f;
     constexpr int MICROSTEPS = 4;
     constexpr float LEAD_SCREW_LEAD_MM = 0.5f;
-    constexpr float BACKLASH_MM = 0.058f;
+    constexpr float DEFAULT_BACKLASH_MM = 0.058f;
     
     constexpr float STEPS_PER_REV = (360.0f / STEP_ANGLE_DEG) * MICROSTEPS;
     constexpr float STEPS_PER_MM = (STEPS_PER_REV * GEARHEAD_RATIO) / LEAD_SCREW_LEAD_MM;
-    constexpr long BACKLASH_STEPS = static_cast<long>(BACKLASH_MM * STEPS_PER_MM);
+    constexpr long DEFAULT_BACKLASH_STEPS = static_cast<long>(DEFAULT_BACKLASH_MM * STEPS_PER_MM);
     
     constexpr float MAX_ACCELERATION_MM_S2 = 0.5f;
     constexpr float MIN_SPEED_MM_S = 0.001f;
@@ -119,6 +119,9 @@ char serialBuffer[Config::SERIAL_BUFFER_SIZE];
 int serialBufferIndex = 0;
 unsigned long lastHeartbeatReceived = 0;
 bool heartbeatTimeoutOccurred = false;
+float minSpeedMmS = Config::MIN_SPEED_MM_S;
+float maxSpeedMmS = Config::MAX_SPEED_MM_S;
+long backlashSteps = Config::DEFAULT_BACKLASH_STEPS;
 
 // =============================================================================
 // Checksum Utilities
@@ -191,7 +194,22 @@ bool anyMotorRunning() {
 }
 
 long backlashEngagedPosition(int8_t direction) {
-    return (direction > 0) ? Config::BACKLASH_STEPS : 0;
+    return (direction > 0) ? backlashSteps : 0;
+}
+
+void applyRuntimeSettings(float minSpeed, float maxSpeed, float backlashMm) {
+    if (minSpeed <= 0.0f || maxSpeed < minSpeed || backlashMm < 0.0f) return;
+
+    minSpeedMmS = minSpeed;
+    maxSpeedMmS = maxSpeed;
+    backlashSteps = mmToSteps(backlashMm);
+
+    for (int i = 0; i < Config::MAX_MOTORS; i++) {
+        if (motors[i].backlashPositionSteps < 0) motors[i].backlashPositionSteps = 0;
+        if (motors[i].backlashPositionSteps > backlashSteps) {
+            motors[i].backlashPositionSteps = backlashSteps;
+        }
+    }
 }
 
 // =============================================================================
@@ -226,7 +244,7 @@ void startMotor(int idx, float speedMmS, float targetPosMm, float currentPosMm) 
 
     m.direction = newDir;
     m.stepsRemaining = stepsNeeded;
-    m.currentSpeed = Config::MIN_SPEED_MM_S;
+    m.currentSpeed = minSpeedMmS;
     m.stepIntervalUs = static_cast<unsigned long>(1000000.0f / (m.currentSpeed * Config::STEPS_PER_MM));
     m.lastStepTime = micros();
     m.lastAccelTime = micros();
@@ -387,6 +405,29 @@ void processCommand(const char* cmd) {
         return;
     }
 
+    if (strcmp(token, "CONFIG") == 0) {
+        token = strtok(NULL, ",");
+        if (!token) return;
+        float minSpeed = atof(token);
+
+        token = strtok(NULL, ",");
+        if (!token) return;
+        float maxSpeed = atof(token);
+
+        token = strtok(NULL, ",");
+        if (!token) return;
+        float backlashMm = atof(token);
+
+        if (minSpeed <= 0.0f || maxSpeed < minSpeed || backlashMm < 0.0f) {
+            sendError(0, "BadConfig");
+            return;
+        }
+
+        applyRuntimeSettings(minSpeed, maxSpeed, backlashMm);
+        sendResponse("OK,CONFIG");
+        return;
+    }
+
     if (strcmp(token, "PAUSE") == 0) {
         token = strtok(NULL, ",");
         if (!token) return;
@@ -418,6 +459,10 @@ void processCommand(const char* cmd) {
         token = strtok(NULL, ",");
         if (!token) return;
         float speed = atof(token);
+        if (speed < minSpeedMmS || speed > maxSpeedMmS) {
+            sendError(id, "BadSpeed");
+            return;
+        }
 
         token = strtok(NULL, ",");
         if (!token) return;
