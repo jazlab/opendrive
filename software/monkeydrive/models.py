@@ -1,6 +1,40 @@
 """Application data models."""
 
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, field, asdict
+
+
+@dataclass
+class TrajectoryState:
+    """MRI-space trajectory parameters for one motor."""
+
+    x: float = 0.0
+    y: float = 0.0
+    ap_rotation: float = 0.0
+    ml_rotation: float = 0.0
+    twist_rotation: float = 0.0
+    perpendicular_offset: float = 0.0
+    probe_location_set: bool = False
+    probe_offset: float = 0.0
+    probe_motor_position: float = 0.0
+
+    def to_dict(self) -> dict:
+        """Convert trajectory to a dictionary."""
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict) -> 'TrajectoryState':
+        """Create TrajectoryState from a dictionary."""
+        return cls(
+            x=float(data.get('x', 0.0)),
+            y=float(data.get('y', 0.0)),
+            ap_rotation=float(data.get('ap_rotation', 0.0)),
+            ml_rotation=float(data.get('ml_rotation', 0.0)),
+            twist_rotation=float(data.get('twist_rotation', 0.0)),
+            perpendicular_offset=float(data.get('perpendicular_offset', 0.0)),
+            probe_location_set=bool(data.get('probe_location_set', False)),
+            probe_offset=float(data.get('probe_offset', 0.0)),
+            probe_motor_position=float(data.get('probe_motor_position', 0.0)),
+        )
 
 @dataclass
 class MotorState:
@@ -27,6 +61,7 @@ class MotorState:
     notes: str = ""
     is_running: bool = False
     is_selected: bool = False
+    trajectory: TrajectoryState = field(default_factory=TrajectoryState)
 
     def to_dict(self) -> dict:
         """Convert state to dictionary for serialization."""
@@ -35,4 +70,10 @@ class MotorState:
     @classmethod
     def from_dict(cls, data: dict) -> 'MotorState':
         """Create MotorState from dictionary."""
+        data = dict(data)
+        trajectory = data.get('trajectory', {})
+        if isinstance(trajectory, TrajectoryState):
+            data['trajectory'] = trajectory
+        else:
+            data['trajectory'] = TrajectoryState.from_dict(trajectory)
         return cls(**data)

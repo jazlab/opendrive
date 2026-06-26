@@ -29,10 +29,12 @@ logger = logging.getLogger(__name__)
 
 
 from monkeydrive.config import Config
+from monkeydrive.anatomy_viewer import AnatomyViewer
 from monkeydrive.dialogs import NotesWindow, SettingsWindow
 from monkeydrive.models import MotorState
 from monkeydrive.protocol import SerialProtocol
 from monkeydrive.serial_manager import SerialManager
+from monkeydrive.trajectory_viewer import TrajectoryViewer
 from monkeydrive.utils import format_mm
 
 
@@ -53,9 +55,11 @@ class MonkeyDriveApp:
         self._motor_states: list = []
         self._motor_widgets: list = []
         self._notes_windows: dict = {}
+        self._trajectory_windows: dict = {}
         self._saved_mode: str = Config.MODE_TARGET
         self._saved_step_speed: float = Config.DEFAULT_STEP_SPEED
         self._saved_step_size: float = Config.DEFAULT_STEP_SIZE
+        self._saved_anatomy_path: str = ""
         self._min_speed: float = Config.MIN_SPEED
         self._max_speed: float = Config.MAX_SPEED
         self._backlash: float = Config.DEFAULT_BACKLASH_MM
@@ -85,6 +89,7 @@ class MonkeyDriveApp:
         self._step_controls_frame: Optional[tk.Frame] = None
         self._step_settings_frame: Optional[tk.Frame] = None
         self._settings_window: Optional[SettingsWindow] = None
+        self._anatomy_window: Optional[AnatomyViewer] = None
         self._motors_container: Optional[tk.Frame] = None
 
         # Load saved state
@@ -276,6 +281,10 @@ class MonkeyDriveApp:
             action_frame, text="Settings", command=self._on_settings
         ).pack(fill=tk.X, pady=(4, 0))
 
+        tk.Button(
+            action_frame, text="Anatomy", command=self._on_anatomy
+        ).pack(fill=tk.X, pady=(4, 0))
+
     def _build_control_buttons(self, parent: tk.Frame):
         """Build the main control buttons."""
         mode_frame = tk.Frame(parent)
@@ -427,6 +436,13 @@ class MonkeyDriveApp:
             command=lambda mid=state.motor_id: self._on_selection_change(mid)
         )
         widgets['checkbox'].pack(side=tk.LEFT)
+
+        widgets['trajectory_button'] = tk.Button(
+            id_frame, text="Trajectory",
+            command=lambda mid=state.motor_id: self._on_trajectory_click(mid),
+            state=tk.NORMAL if self._has_loaded_anatomy() else tk.DISABLED
+        )
+        widgets['trajectory_button'].pack(side=tk.LEFT, padx=(4, 0))
 
         visible_widgets = [id_frame]
 
@@ -990,6 +1006,51 @@ class MonkeyDriveApp:
         self._save_state()
         self._settings_window = None
 
+    def _on_anatomy(self):
+        """Open the anatomy viewer window."""
+        if self._anatomy_window:
+            try:
+                if self._anatomy_window.winfo_exists():
+                    self._anatomy_window.lift()
+                    self._anatomy_window.focus_force()
+                    return
+            except tk.TclError:
+                pass
+
+        self._anatomy_window = AnatomyViewer(
+            self._root,
+            initial_path=self._saved_anatomy_path,
+            on_path_change=self._on_anatomy_path_change
+        )
+        self._anatomy_window.protocol("WM_DELETE_WINDOW", self._on_anatomy_close)
+
+    def _on_anatomy_close(self):
+        """Handle anatomy viewer close."""
+        if self._anatomy_window:
+            try:
+                self._anatomy_window.destroy()
+            except tk.TclError:
+                pass
+        self._anatomy_window = None
+
+    def _on_anatomy_path_change(self, path: str):
+        """Save the most recently loaded anatomy path."""
+        self._saved_anatomy_path = path
+        self._refresh_trajectory_buttons()
+        self._save_state()
+
+    def _has_loaded_anatomy(self) -> bool:
+        """Return whether an anatomy file/folder is available for trajectory planning."""
+        return bool(self._saved_anatomy_path and Path(self._saved_anatomy_path).exists())
+
+    def _refresh_trajectory_buttons(self):
+        """Enable trajectory buttons only when anatomy data is available."""
+        state = tk.NORMAL if self._has_loaded_anatomy() else tk.DISABLED
+        for widgets in self._motor_widgets:
+            button = widgets.get('trajectory_button')
+            if button:
+                button.configure(state=state)
+
     def _safe_popup(self, popup_func: Callable, title: str, message: str = None, **kwargs):
         """
         Show a popup dialog with automatic motor pause and heartbeat suspension.
@@ -1105,6 +1166,7 @@ class MonkeyDriveApp:
                 state.relative_zero_point = state.absolute
                 widgets['absolute_var'].set(format_mm(state.absolute))
                 widgets['relative_var'].set("0.000")
+                self._update_trajectory_motor_position(motor_id)
             else:
                 raise ValueError("Position out of range")
         except ValueError:
@@ -1174,6 +1236,57 @@ class MonkeyDriveApp:
 
         if motor_id in self._notes_windows:
             del self._notes_windows[motor_id]
+
+    def _on_trajectory_click(self, motor_id: int):
+        """Open the trajectory viewer for one motor."""
+        state = self._get_state(motor_id)
+        if not state:
+            return
+
+        if motor_id in self._trajectory_windows:
+            try:
+                window = self._trajectory_windows[motor_id]
+                if window.winfo_exists():
+                    window.lift()
+                    window.focus_force()
+                    return
+            except tk.TclError:
+                pass
+
+        if not self._saved_anatomy_path:
+            messagebox.showinfo(
+                "No Anatomy Loaded",
+                "Open the Anatomy Viewer and load an MRI before defining trajectories."
+            )
+            return
+
+        window = TrajectoryViewer(
+            self._root,
+            motor_id,
+            state.trajectory,
+            state.absolute,
+            self._saved_anatomy_path,
+            self._on_trajectory_save
+        )
+        window.protocol("WM_DELETE_WINDOW", lambda mid=motor_id: self._on_trajectory_close(mid))
+        self._trajectory_windows[motor_id] = window
+
+    def _on_trajectory_save(self, motor_id: int, trajectory):
+        """Save trajectory parameters for one motor."""
+        state = self._get_state(motor_id)
+        if state:
+            state.trajectory = trajectory
+            self._save_state()
+
+    def _on_trajectory_close(self, motor_id: int):
+        """Handle trajectory viewer close."""
+        window = self._trajectory_windows.get(motor_id)
+        if window:
+            try:
+                window.destroy()
+            except tk.TclError:
+                pass
+        self._trajectory_windows.pop(motor_id, None)
 
     # -------------------------------------------------------------------------
     # Port Management
@@ -1517,6 +1630,19 @@ class MonkeyDriveApp:
                 widgets['absolute_var'].set(format_mm(state.absolute))
             if widgets['relative_entry']['state'] == 'readonly':
                 widgets['relative_var'].set(format_mm(state.relative))
+            self._update_trajectory_motor_position(motor_id)
+
+    def _update_trajectory_motor_position(self, motor_id: int):
+        """Notify an open trajectory viewer that its motor position changed."""
+        state = self._get_state(motor_id)
+        window = self._trajectory_windows.get(motor_id)
+        if not state or not window:
+            return
+        try:
+            if window.winfo_exists():
+                window.update_motor_position(state.absolute)
+        except tk.TclError:
+            pass
 
     # -------------------------------------------------------------------------
     # State Persistence
@@ -1538,6 +1664,7 @@ class MonkeyDriveApp:
                 'min_speed': self._min_speed,
                 'max_speed': self._max_speed,
                 'backlash': round(self._backlash, 3),
+                'anatomy_path': self._saved_anatomy_path,
             }
             with open(self._get_data_path(), 'w', encoding='utf-8') as f:
                 json.dump(data, f, indent=2)
@@ -1570,6 +1697,7 @@ class MonkeyDriveApp:
                 self._min_speed = float(data.get('min_speed', Config.MIN_SPEED))
                 self._max_speed = float(data.get('max_speed', Config.MAX_SPEED))
                 self._backlash = round(float(data.get('backlash', Config.DEFAULT_BACKLASH_MM)), 3)
+                self._saved_anatomy_path = str(data.get('anatomy_path', ""))
 
                 if self._min_speed <= 0 or self._max_speed < self._min_speed or self._backlash < 0:
                     raise ValueError("Invalid persisted settings")
@@ -1584,6 +1712,7 @@ class MonkeyDriveApp:
             self._min_speed = Config.MIN_SPEED
             self._max_speed = Config.MAX_SPEED
             self._backlash = Config.DEFAULT_BACKLASH_MM
+            self._saved_anatomy_path = ""
 
     def _schedule_auto_save(self):
         """Schedule periodic auto-save of state."""
@@ -1603,6 +1732,12 @@ class MonkeyDriveApp:
         self._save_state()
 
         for window in self._notes_windows.values():
+            try:
+                window.destroy()
+            except tk.TclError:
+                pass
+
+        for window in self._trajectory_windows.values():
             try:
                 window.destroy()
             except tk.TclError:

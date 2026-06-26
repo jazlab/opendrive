@@ -21,6 +21,7 @@ class Config:
     HEARTBEAT_INTERVAL: float = 0.5
     HEARTBEAT_TIMEOUT: float = 1.0
     POSITION_UPDATE_INTERVAL: float = 0.2
+    TRAJECTORY_LIVE_UPDATE_INTERVAL_MS: int = 750
     AUTO_SAVE_INTERVAL: float = 5.0
     SERIAL_READ_INTERVAL: float = 0.02
 
@@ -50,7 +51,7 @@ class Config:
 
     # Column Weights and Min Sizes for Grid Layout
     # Col 0: Buttons/ID | Col 1: Speed | Col 2: Target | Col 3: Abs | Col 4: Rel | Col 5: Notes
-    COL_MIN_WIDTHS: tuple = (120, 100, 100, 100, 100, 150)
-    STEP_COL_MIN_WIDTHS: tuple = (120, 120, 120, 150)
+    COL_MIN_WIDTHS: tuple = (205, 100, 100, 100, 100, 150)
+    STEP_COL_MIN_WIDTHS: tuple = (205, 120, 120, 150)
     ROW_PAD_Y: int = 2
     HEADER_PAD_Y: tuple = (5, 10)
