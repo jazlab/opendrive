@@ -29,13 +29,12 @@ logger = logging.getLogger(__name__)
 
 
 from monkeydrive.config import Config
-from monkeydrive.anatomy_viewer import AnatomyViewer
 from monkeydrive.dialogs import NotesWindow, SettingsWindow
-from monkeydrive.models import MotorState
+from monkeydrive.models import MotorState, TrajectoryState
 from monkeydrive.protocol import SerialProtocol
 from monkeydrive.serial_manager import SerialManager
-from monkeydrive.trajectory_viewer import TrajectoryViewer
 from monkeydrive.utils import format_mm
+from monkeydrive.viewer_process import JsonViewerProcess
 
 
 # =============================================================================
@@ -56,6 +55,7 @@ class MonkeyDriveApp:
         self._motor_widgets: list = []
         self._notes_windows: dict = {}
         self._trajectory_windows: dict = {}
+        self._trajectory_summary_window: Optional[JsonViewerProcess] = None
         self._saved_mode: str = Config.MODE_TARGET
         self._saved_step_speed: float = Config.DEFAULT_STEP_SPEED
         self._saved_step_size: float = Config.DEFAULT_STEP_SIZE
@@ -89,7 +89,8 @@ class MonkeyDriveApp:
         self._step_controls_frame: Optional[tk.Frame] = None
         self._step_settings_frame: Optional[tk.Frame] = None
         self._settings_window: Optional[SettingsWindow] = None
-        self._anatomy_window: Optional[AnatomyViewer] = None
+        self._anatomy_window: Optional[JsonViewerProcess] = None
+        self._trajectory_summary_btn: Optional[tk.Button] = None
         self._motors_container: Optional[tk.Frame] = None
 
         # Load saved state
@@ -113,6 +114,7 @@ class MonkeyDriveApp:
 
         # Start auto-save timer
         self._schedule_auto_save()
+        self._schedule_viewer_process_poll()
 
         # Handle window close
         self._root.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -284,6 +286,12 @@ class MonkeyDriveApp:
         tk.Button(
             action_frame, text="Anatomy", command=self._on_anatomy
         ).pack(fill=tk.X, pady=(4, 0))
+
+        self._trajectory_summary_btn = tk.Button(
+            action_frame, text="Trajectory Summary", command=self._on_trajectory_summary,
+            state=tk.NORMAL if self._has_loaded_anatomy() else tk.DISABLED
+        )
+        self._trajectory_summary_btn.pack(fill=tk.X, pady=(4, 0))
 
     def _build_control_buttons(self, parent: tk.Frame):
         """Build the main control buttons."""
@@ -1008,29 +1016,20 @@ class MonkeyDriveApp:
 
     def _on_anatomy(self):
         """Open the anatomy viewer window."""
-        if self._anatomy_window:
-            try:
-                if self._anatomy_window.winfo_exists():
-                    self._anatomy_window.lift()
-                    self._anatomy_window.focus_force()
-                    return
-            except tk.TclError:
-                pass
+        if self._anatomy_window and self._anatomy_window.is_running():
+            self._anatomy_window.send_focus()
+            return
 
-        self._anatomy_window = AnatomyViewer(
-            self._root,
-            initial_path=self._saved_anatomy_path,
-            on_path_change=self._on_anatomy_path_change
+        self._anatomy_window = JsonViewerProcess(
+            "monkeydrive.anatomy_process",
+            ["--initial-path", self._saved_anatomy_path],
+            cwd=Path(__file__).parent,
         )
-        self._anatomy_window.protocol("WM_DELETE_WINDOW", self._on_anatomy_close)
 
     def _on_anatomy_close(self):
         """Handle anatomy viewer close."""
         if self._anatomy_window:
-            try:
-                self._anatomy_window.destroy()
-            except tk.TclError:
-                pass
+            self._anatomy_window.close()
         self._anatomy_window = None
 
     def _on_anatomy_path_change(self, path: str):
@@ -1046,10 +1045,51 @@ class MonkeyDriveApp:
     def _refresh_trajectory_buttons(self):
         """Enable trajectory buttons only when anatomy data is available."""
         state = tk.NORMAL if self._has_loaded_anatomy() else tk.DISABLED
+        if self._trajectory_summary_btn:
+            self._trajectory_summary_btn.configure(state=state)
         for widgets in self._motor_widgets:
             button = widgets.get('trajectory_button')
             if button:
                 button.configure(state=state)
+
+    def _schedule_viewer_process_poll(self):
+        """Poll subprocess viewer events without blocking the GUI."""
+        self._poll_viewer_processes()
+        self._root.after(100, self._schedule_viewer_process_poll)
+
+    def _poll_viewer_processes(self):
+        """Handle pending messages from anatomy/trajectory subprocesses."""
+        if self._anatomy_window:
+            for event in self._anatomy_window.poll_events():
+                event_type = event.get("type")
+                if event_type == "path_change":
+                    self._on_anatomy_path_change(str(event.get("path", "")))
+                elif event_type in ("closed", "exited"):
+                    self._anatomy_window = None
+                elif event_type == "error":
+                    logger.error("Anatomy viewer error: %s", event.get("message"))
+
+        for motor_id, handle in list(self._trajectory_windows.items()):
+            for event in handle.poll_events():
+                event_type = event.get("type")
+                if event_type == "save":
+                    trajectory = TrajectoryState.from_dict(event.get("trajectory", {}))
+                    self._on_trajectory_save(motor_id, trajectory)
+                elif event_type in ("closed", "exited"):
+                    self._trajectory_windows.pop(motor_id, None)
+                elif event_type == "error":
+                    logger.error(
+                        "Trajectory viewer error for motor %s: %s",
+                        motor_id, event.get("message")
+                    )
+
+        if self._trajectory_summary_window:
+            for event in self._trajectory_summary_window.poll_events():
+                event_type = event.get("type")
+                if event_type in ("closed", "exited"):
+                    self._trajectory_summary_window = None
+                elif event_type == "error":
+                    logger.error("Trajectory summary error: %s", event.get("message"))
 
     def _safe_popup(self, popup_func: Callable, title: str, message: str = None, **kwargs):
         """
@@ -1117,6 +1157,7 @@ class MonkeyDriveApp:
             try:
                 new_target = float(widgets['target_var'].get())
                 state.target = round(new_target, 3)
+                self._sync_trajectory_from_target(state)
             except ValueError:
                 pass
 
@@ -1244,14 +1285,11 @@ class MonkeyDriveApp:
             return
 
         if motor_id in self._trajectory_windows:
-            try:
-                window = self._trajectory_windows[motor_id]
-                if window.winfo_exists():
-                    window.lift()
-                    window.focus_force()
-                    return
-            except tk.TclError:
-                pass
+            handle = self._trajectory_windows[motor_id]
+            if handle.is_running():
+                handle.send_focus()
+                return
+            self._trajectory_windows.pop(motor_id, None)
 
         if not self._saved_anatomy_path:
             messagebox.showinfo(
@@ -1260,32 +1298,109 @@ class MonkeyDriveApp:
             )
             return
 
-        window = TrajectoryViewer(
-            self._root,
-            motor_id,
-            state.trajectory,
-            state.absolute,
-            self._saved_anatomy_path,
-            self._on_trajectory_save
+        handle = JsonViewerProcess(
+            "monkeydrive.trajectory_process",
+            [
+                "--motor-id", str(motor_id),
+                "--motor-position", f"{state.absolute:g}",
+                "--anatomy-path", self._saved_anatomy_path,
+                "--trajectory-json", json.dumps(state.trajectory.to_dict()),
+            ],
+            cwd=Path(__file__).parent,
         )
-        window.protocol("WM_DELETE_WINDOW", lambda mid=motor_id: self._on_trajectory_close(mid))
-        self._trajectory_windows[motor_id] = window
+        self._trajectory_windows[motor_id] = handle
+
+    def _on_trajectory_summary(self):
+        """Open the trajectory summary viewer."""
+        if self._trajectory_summary_window and self._trajectory_summary_window.is_running():
+            self._trajectory_summary_window.send_focus()
+            return
+        self._trajectory_summary_window = None
+
+        if not self._saved_anatomy_path:
+            messagebox.showinfo(
+                "No Anatomy Loaded",
+                "Open the Anatomy Viewer and load an MRI before viewing trajectory summaries."
+            )
+            return
+
+        handle = JsonViewerProcess(
+            "monkeydrive.trajectory_summary_process",
+            [
+                "--anatomy-path", self._saved_anatomy_path,
+                "--motor-states-json", json.dumps([state.to_dict() for state in self._motor_states]),
+            ],
+            cwd=Path(__file__).parent,
+        )
+        self._trajectory_summary_window = handle
 
     def _on_trajectory_save(self, motor_id: int, trajectory):
         """Save trajectory parameters for one motor."""
         state = self._get_state(motor_id)
         if state:
+            probe_changed = self._trajectory_probe_changed(state.trajectory, trajectory)
             state.trajectory = trajectory
+            if probe_changed:
+                self._sync_trajectory_from_target(state)
+            else:
+                self._sync_target_from_trajectory(state)
+            self._update_trajectory_summary_motor_state(state)
             self._save_state()
+
+    def _trajectory_probe_changed(self, previous: TrajectoryState, current: TrajectoryState) -> bool:
+        """Return True when the probe calibration changed in a trajectory save."""
+        return (
+            previous.probe_location_set != current.probe_location_set
+            or round(previous.probe_offset, 6) != round(current.probe_offset, 6)
+            or round(previous.probe_motor_position, 6) != round(current.probe_motor_position, 6)
+        )
+
+    def _sync_target_from_trajectory(self, state: MotorState):
+        """Convert a locked MRI target depth into the motor target position."""
+        trajectory = state.trajectory
+        if not (trajectory.probe_location_set and trajectory.target_location_set):
+            return
+
+        target = round(
+            trajectory.probe_motor_position + (trajectory.probe_offset - trajectory.target_offset),
+            3
+        )
+        if not (Config.MIN_TARGET_POS <= target <= Config.MAX_TARGET_POS):
+            logger.warning(
+                "Trajectory target for Motor %s is outside target bounds: %.3f mm",
+                state.motor_id,
+                target,
+            )
+            return
+
+        state.target = target
+        widgets = self._get_widgets(state.motor_id)
+        if widgets and 'target_var' in widgets:
+            widgets['target_var'].set(format_mm(state.target) if state.target else "")
+
+    def _sync_trajectory_from_target(self, state: MotorState):
+        """Convert a motor target position into the MRI target line position."""
+        trajectory = state.trajectory
+        if not (trajectory.probe_location_set and trajectory.target_location_set):
+            return
+
+        target_offset = round(
+            trajectory.probe_offset - (state.target - trajectory.probe_motor_position),
+            3
+        )
+        trajectory.target_offset = target_offset
+
+        window = self._trajectory_windows.get(state.motor_id)
+        if window and window.is_running():
+            window.send_target_offset(target_offset)
+
+        self._update_trajectory_summary_motor_state(state)
 
     def _on_trajectory_close(self, motor_id: int):
         """Handle trajectory viewer close."""
         window = self._trajectory_windows.get(motor_id)
         if window:
-            try:
-                window.destroy()
-            except tk.TclError:
-                pass
+            window.close()
         self._trajectory_windows.pop(motor_id, None)
 
     # -------------------------------------------------------------------------
@@ -1636,12 +1751,49 @@ class MonkeyDriveApp:
         """Notify an open trajectory viewer that its motor position changed."""
         state = self._get_state(motor_id)
         window = self._trajectory_windows.get(motor_id)
+        self._update_trajectory_summary_motor_position(motor_id)
         if not state or not window:
             return
         try:
-            if window.winfo_exists():
-                window.update_motor_position(state.absolute)
-        except tk.TclError:
+            if window.is_running():
+                window.send_motor_position(state.absolute)
+            else:
+                self._trajectory_windows.pop(motor_id, None)
+        except OSError:
+            pass
+
+    def _update_trajectory_summary_motor_position(self, motor_id: int):
+        """Notify the trajectory summary viewer that one motor position changed."""
+        state = self._get_state(motor_id)
+        window = self._trajectory_summary_window
+        if not state or not window:
+            return
+        try:
+            if window.is_running():
+                window.send({
+                    "type": "motor_position",
+                    "motor_id": motor_id,
+                    "position": state.absolute,
+                })
+            else:
+                self._trajectory_summary_window = None
+        except OSError:
+            pass
+
+    def _update_trajectory_summary_motor_state(self, state: MotorState):
+        """Notify the trajectory summary viewer that one motor state changed."""
+        window = self._trajectory_summary_window
+        if not window:
+            return
+        try:
+            if window.is_running():
+                window.send({
+                    "type": "motor_state",
+                    "motor_state": state.to_dict(),
+                })
+            else:
+                self._trajectory_summary_window = None
+        except OSError:
             pass
 
     # -------------------------------------------------------------------------
@@ -1737,11 +1889,14 @@ class MonkeyDriveApp:
             except tk.TclError:
                 pass
 
+        if self._anatomy_window:
+            self._anatomy_window.terminate()
+
+        if self._trajectory_summary_window:
+            self._trajectory_summary_window.terminate()
+
         for window in self._trajectory_windows.values():
-            try:
-                window.destroy()
-            except tk.TclError:
-                pass
+            window.terminate()
 
         self._root.destroy()
 

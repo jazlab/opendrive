@@ -56,7 +56,7 @@ class TrajectoryViewer(tk.Toplevel):
         self._image_row: tk.Frame | None = None
         self._contrast_low_var = tk.DoubleVar(value=1.0)
         self._contrast_high_var = tk.DoubleVar(value=99.0)
-        self._zoom_var = tk.DoubleVar(value=1.0)
+        self._zoom_var = tk.DoubleVar(value=self._trajectory.zoom)
         self._status_var = tk.StringVar(value="No anatomy loaded")
         self._field_warning_active = False
         self._live_update_job = None
@@ -68,6 +68,8 @@ class TrajectoryViewer(tk.Toplevel):
         self._twist_var = tk.StringVar(value=f"{self._trajectory.twist_rotation:g}")
         self._offset_var = tk.StringVar(value=f"{self._trajectory.perpendicular_offset:g}")
         self._probe_button: tk.Button | None = None
+        self._target_button: tk.Button | None = None
+        self._target_editing = False
 
         self.title(f"Motor {motor_id} Trajectory")
         self.geometry("1550x760")
@@ -93,7 +95,7 @@ class TrajectoryViewer(tk.Toplevel):
         tk.Button(toolbar, text="-", command=lambda: self._adjust_zoom(-0.1), width=3).pack(side=tk.LEFT)
         tk.Scale(
             toolbar, from_=0.5, to=3.0, resolution=0.1, orient=tk.HORIZONTAL,
-            variable=self._zoom_var, command=lambda _value: self._render_all(),
+            variable=self._zoom_var, command=self._on_zoom_change,
             showvalue=True, length=160
         ).pack(side=tk.LEFT, padx=4)
         tk.Button(toolbar, text="+", command=lambda: self._adjust_zoom(0.1), width=3).pack(side=tk.LEFT)
@@ -103,6 +105,11 @@ class TrajectoryViewer(tk.Toplevel):
             command=self._toggle_probe_location
         )
         self._probe_button.pack(side=tk.LEFT, padx=(6, 0))
+        self._target_button = tk.Button(
+            toolbar, text=self._target_button_text(),
+            command=self._toggle_target_location
+        )
+        self._target_button.pack(side=tk.LEFT, padx=(6, 0))
 
         viewer_frame = tk.Frame(container)
         viewer_frame.pack(fill=tk.BOTH, expand=True)
@@ -172,6 +179,8 @@ class TrajectoryViewer(tk.Toplevel):
             canvas.bind("<Configure>", lambda _event, plane_axis=axis: self._render_plane(plane_axis))
             if axis == 2:
                 self._bind_perpendicular_scroll(canvas)
+            else:
+                self._bind_target_scroll(canvas)
             self._canvases[axis] = canvas
 
         tk.Label(container, textvariable=self._status_var, anchor='w').pack(fill=tk.X, pady=(10, 0))
@@ -259,6 +268,8 @@ class TrajectoryViewer(tk.Toplevel):
             probe_location_set = self._trajectory.probe_location_set
             probe_offset = self._trajectory.probe_offset
             probe_motor_position = self._trajectory.probe_motor_position
+            target_location_set = self._trajectory.target_location_set
+            target_offset = self._trajectory.target_offset
             self._trajectory = TrajectoryState(
                 x=float(self._x_var.get()),
                 y=float(self._y_var.get()),
@@ -266,9 +277,12 @@ class TrajectoryViewer(tk.Toplevel):
                 ml_rotation=float(self._ml_var.get()),
                 twist_rotation=float(self._twist_var.get()),
                 perpendicular_offset=float(self._offset_var.get()),
+                zoom=float(self._zoom_var.get()),
                 probe_location_set=probe_location_set,
                 probe_offset=probe_offset,
                 probe_motor_position=probe_motor_position,
+                target_location_set=target_location_set,
+                target_offset=target_offset,
             )
         except ValueError:
             if show_warning and not self._field_warning_active:
@@ -289,6 +303,11 @@ class TrajectoryViewer(tk.Toplevel):
     def _probe_button_text(self) -> str:
         return "Edit probe location" if self._trajectory.probe_location_set else "Set probe location"
 
+    def _target_button_text(self) -> str:
+        if self._target_editing:
+            return "Finish target location"
+        return "Edit target location" if self._trajectory.target_location_set else "Set target location"
+
     def _toggle_probe_location(self):
         if self._trajectory.probe_location_set:
             self._trajectory.probe_location_set = False
@@ -301,8 +320,27 @@ class TrajectoryViewer(tk.Toplevel):
 
         if self._probe_button:
             self._probe_button.configure(text=self._probe_button_text())
+        if self._target_button:
+            self._target_button.configure(text=self._target_button_text())
         self._offset_var.set(f"{self._active_perpendicular_offset():g}")
         self._render_all()
+        self._on_save(self._motor_id, self._trajectory)
+
+    def _toggle_target_location(self):
+        if self._target_editing:
+            self._target_editing = False
+        else:
+            if not self._apply_fields(show_warning=True):
+                return
+            was_set = self._trajectory.target_location_set
+            self._trajectory.target_location_set = True
+            if not was_set:
+                self._trajectory.target_offset = self._active_perpendicular_offset()
+            self._target_editing = True
+
+        if self._target_button:
+            self._target_button.configure(text=self._target_button_text())
+        self._redraw_inline_depth_lines()
         self._on_save(self._motor_id, self._trajectory)
 
     def _render_all(self):
@@ -363,6 +401,11 @@ class TrajectoryViewer(tk.Toplevel):
 
     def _active_perpendicular_offset(self) -> float:
         if self._trajectory.probe_location_set:
+            return self._probe_depth_offset()
+        return self._trajectory.perpendicular_offset
+
+    def _probe_depth_offset(self) -> float:
+        if self._trajectory.probe_location_set:
             motor_delta = self._motor_position - self._trajectory.probe_motor_position
             return self._trajectory.probe_offset - motor_delta
         return self._trajectory.perpendicular_offset
@@ -382,9 +425,20 @@ class TrajectoryViewer(tk.Toplevel):
     def _run_live_update(self):
         """Render the live-updating trajectory pane at a throttled rate."""
         self._live_update_job = None
-        if self._trajectory.probe_location_set:
-            self._render_plane(2)
-            self._redraw_inline_depth_lines()
+        try:
+            if self._trajectory.probe_location_set:
+                self._render_plane(2)
+                self._redraw_inline_depth_lines()
+        except tk.TclError:
+            return
+
+    def update_target_offset(self, target_offset: float):
+        """Update the MRI target line from the main GUI target value."""
+        self._trajectory.target_location_set = True
+        self._trajectory.target_offset = round(float(target_offset), 3)
+        if self._target_button:
+            self._target_button.configure(text=self._target_button_text())
+        self._redraw_inline_depth_lines()
 
     def _trajectory_basis(self):
         x_axis = np.asarray([1.0, 0.0, 0.0])
@@ -445,23 +499,36 @@ class TrajectoryViewer(tk.Toplevel):
         if axis in (0, 1):
             canvas.create_line(center_x, top, center_x, top + image_height, fill=color, width=1, tags=("trajectory",))
             canvas.create_line(left, center_y, left + image_width, center_y, fill=color, width=1, tags=("trajectory",))
+            self._draw_target_line(canvas, left, top, image_width, image_height, height_mm)
             self._draw_probe_line(canvas, center_x, top, image_height, height_mm)
         else:
             canvas.create_line(left, center_y, left + image_width, center_y, fill=color, width=1, tags=("trajectory",))
             canvas.create_line(center_x, top, center_x, top + image_height, fill=color, width=1, tags=("trajectory",))
 
+    def _draw_target_line(self, canvas: tk.Canvas, left: float, top: float,
+                          image_width: int, image_height: int, height_mm: float):
+        if not self._trajectory.target_location_set:
+            return
+        y = top + self._offset_to_image_y(image_height, height_mm, self._trajectory.target_offset)
+        canvas.create_line(
+            left, y, left + image_width, y,
+            fill="#ff3333", width=2, tags=("trajectory",)
+        )
+
     def _draw_probe_line(self, canvas: tk.Canvas, center_x: float, top: float, image_height: int, height_mm: float):
         if not self._trajectory.probe_location_set:
             return
-        bottom_y = top + self._offset_to_image_y(image_height, height_mm)
+        bottom_y = top + self._offset_to_image_y(image_height, height_mm, self._probe_depth_offset())
         canvas.create_line(
             center_x, top, center_x, bottom_y,
             fill="#1f6fff", width=4, tags=("trajectory",)
         )
 
-    def _offset_to_image_y(self, image_height: int, height_mm: float) -> float:
+    def _offset_to_image_y(self, image_height: int, height_mm: float, offset: float = None) -> float:
         half_height = max(float(height_mm) / 2.0, 1.0)
-        normalized = (half_height - self._active_perpendicular_offset()) / (2.0 * half_height)
+        if offset is None:
+            offset = self._active_perpendicular_offset()
+        normalized = (half_height - offset) / (2.0 * half_height)
         normalized = max(0.0, min(1.0, normalized))
         return normalized * image_height
 
@@ -469,6 +536,11 @@ class TrajectoryViewer(tk.Toplevel):
         widget.bind("<MouseWheel>", self._on_perpendicular_scroll)
         widget.bind("<Button-4>", self._on_perpendicular_scroll)
         widget.bind("<Button-5>", self._on_perpendicular_scroll)
+
+    def _bind_target_scroll(self, widget: tk.Widget):
+        widget.bind("<MouseWheel>", self._on_target_scroll)
+        widget.bind("<Button-4>", self._on_target_scroll)
+        widget.bind("<Button-5>", self._on_target_scroll)
 
     def _on_perpendicular_scroll(self, event):
         if not self._volume:
@@ -487,18 +559,40 @@ class TrajectoryViewer(tk.Toplevel):
         self._redraw_inline_depth_lines()
         return "break"
 
+    def _on_target_scroll(self, event):
+        if not self._target_editing or not self._trajectory.target_location_set:
+            return None
+
+        if getattr(event, "num", None) == 4 or getattr(event, "delta", 0) > 0:
+            step = 0.5
+        else:
+            step = -0.5
+
+        self._trajectory.target_offset = round(self._trajectory.target_offset + step, 3)
+        self._redraw_inline_depth_lines()
+        self._on_save(self._motor_id, self._trajectory)
+        return "break"
+
     def _redraw_inline_depth_lines(self):
         for axis in (0, 1):
             image_ref = self._image_refs.get(axis)
             canvas = self._canvases.get(axis)
-            if not image_ref or not canvas or not canvas.winfo_exists():
+            try:
+                if not image_ref or not canvas or not canvas.winfo_exists():
+                    continue
+                self._draw_plane(axis, image_ref)
+            except tk.TclError:
                 continue
-            self._draw_plane(axis, image_ref)
 
     def _adjust_zoom(self, delta: float):
         zoom = max(0.5, min(3.0, round(float(self._zoom_var.get()) + delta, 1)))
         self._zoom_var.set(zoom)
+        self._on_zoom_change()
+
+    def _on_zoom_change(self, _value=None):
+        self._trajectory.zoom = round(float(self._zoom_var.get()), 1)
         self._render_all()
+        self._on_save(self._motor_id, self._trajectory)
 
     def _style_widget_tree(self, widget=None):
         widget = widget or self

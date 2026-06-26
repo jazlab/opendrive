@@ -13,9 +13,12 @@ class TrajectoryState:
     ml_rotation: float = 0.0
     twist_rotation: float = 0.0
     perpendicular_offset: float = 0.0
+    zoom: float = 1.0
     probe_location_set: bool = False
     probe_offset: float = 0.0
     probe_motor_position: float = 0.0
+    target_location_set: bool = False
+    target_offset: float = 0.0
 
     def to_dict(self) -> dict:
         """Convert trajectory to a dictionary."""
@@ -31,9 +34,12 @@ class TrajectoryState:
             ml_rotation=float(data.get('ml_rotation', 0.0)),
             twist_rotation=float(data.get('twist_rotation', 0.0)),
             perpendicular_offset=float(data.get('perpendicular_offset', 0.0)),
+            zoom=float(data.get('zoom', 1.0)),
             probe_location_set=bool(data.get('probe_location_set', False)),
             probe_offset=float(data.get('probe_offset', 0.0)),
             probe_motor_position=float(data.get('probe_motor_position', 0.0)),
+            target_location_set=bool(data.get('target_location_set', False)),
+            target_offset=float(data.get('target_offset', 0.0)),
         )
 
 @dataclass

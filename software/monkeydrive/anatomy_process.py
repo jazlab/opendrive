@@ -1,0 +1,79 @@
+"""Subprocess entry point for the anatomy viewer."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import queue
+import sys
+import threading
+import traceback
+
+import tkinter as tk
+
+from .anatomy_viewer import AnatomyViewer
+
+
+def _emit(message: dict):
+    print(json.dumps(message), flush=True)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--initial-path", default="")
+    args = parser.parse_args()
+
+    commands: queue.Queue = queue.Queue()
+
+    def reader():
+        for line in sys.stdin:
+            try:
+                commands.put(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+
+    threading.Thread(target=reader, daemon=True).start()
+
+    root = tk.Tk()
+    root.withdraw()
+    viewer = None
+
+    def on_path_change(path: str):
+        _emit({"type": "path_change", "path": path})
+
+    def close():
+        _emit({"type": "closed"})
+        root.destroy()
+
+    try:
+        viewer = AnatomyViewer(root, initial_path=args.initial_path, on_path_change=on_path_change)
+        viewer.protocol("WM_DELETE_WINDOW", close)
+
+        def poll_commands():
+            while True:
+                try:
+                    command = commands.get_nowait()
+                except queue.Empty:
+                    break
+
+                command_type = command.get("type")
+                if command_type == "focus" and viewer.winfo_exists():
+                    viewer.lift()
+                    viewer.focus_force()
+                elif command_type == "close":
+                    close()
+                    return
+
+            root.after(50, poll_commands)
+
+        root.after(50, poll_commands)
+        root.mainloop()
+        return 0
+    except Exception as exc:
+        _emit({"type": "error", "message": str(exc)})
+        traceback.print_exc(file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
