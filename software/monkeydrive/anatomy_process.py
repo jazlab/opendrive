@@ -56,6 +56,7 @@ def main() -> int:
     try:
         viewer = AnatomyViewer(root, initial_path=args.initial_path, on_path_change=on_path_change)
         viewer.protocol("WM_DELETE_WINDOW", close)
+        root.bind_all("<End>", lambda _event: (_emit({"type": "pause_requested"}), "break")[1])
 
         def poll_commands():
             while True:

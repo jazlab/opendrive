@@ -34,6 +34,7 @@ class Config:
     ENTRY_WIDTH: int = 12
     MODE_TARGET: str = "target"
     MODE_STEP: str = "step"
+    MODE_PROGRAM: str = "program"
     DEFAULT_STEP_SPEED: float = 0.01
     DEFAULT_STEP_SIZE: float = 0.05
     SPEED_KEY_INCREMENT: float = 0.001
@@ -42,6 +43,7 @@ class Config:
     STEP_SIZE_KEY_INCREMENT: float = 0.01
     STEP_JOG_HOLD_DELAY_MS: int = 300
     STEP_KEY_RELEASE_DEBOUNCE_MS: int = 100
+    PROGRAM_TARGET_TOLERANCE_MM: float = 0.002
     COLOR_BG: str = "#f0f0f0"
     COLOR_FG: str = "#000000"
     COLOR_ENTRY_BG: str = "#ffffff"
@@ -53,5 +55,6 @@ class Config:
     # Col 0: Buttons/ID | Col 1: Speed | Col 2: Target | Col 3: Abs | Col 4: Rel | Col 5: Notes
     COL_MIN_WIDTHS: tuple = (205, 100, 100, 100, 100, 150)
     STEP_COL_MIN_WIDTHS: tuple = (205, 120, 120, 150)
+    PROGRAM_COL_MIN_WIDTHS: tuple = (205, 140, 80, 100, 100, 100, 100, 150)
     ROW_PAD_Y: int = 2
     HEADER_PAD_Y: tuple = (5, 10)

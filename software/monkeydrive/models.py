@@ -4,6 +4,28 @@ from dataclasses import dataclass, field, asdict
 
 
 @dataclass
+class InstructionStep:
+    """One target/speed instruction for program mode."""
+
+    target: float = 0.0
+    speed: float = 0.0
+    notes: str = ""
+
+    def to_dict(self) -> dict:
+        """Convert instruction to a dictionary."""
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict) -> 'InstructionStep':
+        """Create InstructionStep from a dictionary."""
+        return cls(
+            target=float(data.get('target', data.get('target_mm', 0.0))),
+            speed=float(data.get('speed', data.get('speed_mm_s', 0.0))),
+            notes=str(data.get('notes', "")),
+        )
+
+
+@dataclass
 class TrajectoryState:
     """MRI-space trajectory parameters for one motor."""
 
@@ -68,6 +90,9 @@ class MotorState:
     is_running: bool = False
     is_selected: bool = False
     trajectory: TrajectoryState = field(default_factory=TrajectoryState)
+    instructions: list[InstructionStep] = field(default_factory=list)
+    instruction_index: int = 0
+    instruction_status: str = "idle"
 
     def to_dict(self) -> dict:
         """Convert state to dictionary for serialization."""
@@ -82,4 +107,11 @@ class MotorState:
             data['trajectory'] = trajectory
         else:
             data['trajectory'] = TrajectoryState.from_dict(trajectory)
+        instructions = data.get('instructions', [])
+        data['instructions'] = [
+            step if isinstance(step, InstructionStep) else InstructionStep.from_dict(step)
+            for step in instructions
+        ]
+        data['instruction_index'] = int(data.get('instruction_index', 0))
+        data['instruction_status'] = str(data.get('instruction_status', "idle"))
         return cls(**data)

@@ -221,4 +221,3 @@ Before routine use:
 8. Verify backlash compensation with rapid direction reversals.
 9. Load anatomy and confirm trajectory/probe/target overlays.
 10. Run the GUI stress test for at least several minutes.
-

@@ -29,8 +29,8 @@ logger = logging.getLogger(__name__)
 
 
 from monkeydrive.config import Config
-from monkeydrive.dialogs import NotesWindow, SettingsWindow
-from monkeydrive.models import MotorState, TrajectoryState
+from monkeydrive.dialogs import InstructionsWindow, NotesWindow, ProgramLoadWindow, SettingsWindow
+from monkeydrive.models import InstructionStep, MotorState, TrajectoryState
 from monkeydrive.protocol import SerialProtocol
 from monkeydrive.serial_manager import SerialManager
 from monkeydrive.utils import format_mm
@@ -61,6 +61,7 @@ class MonkeyDriveApp:
         self._saved_step_speed: float = Config.DEFAULT_STEP_SPEED
         self._saved_step_size: float = Config.DEFAULT_STEP_SIZE
         self._saved_anatomy_path: str = ""
+        self._recent_programs: list[str] = []
         self._min_speed: float = Config.MIN_SPEED
         self._max_speed: float = Config.MAX_SPEED
         self._backlash: float = Config.DEFAULT_BACKLASH_MM
@@ -89,6 +90,7 @@ class MonkeyDriveApp:
         self._target_controls_frame: Optional[tk.Frame] = None
         self._step_controls_frame: Optional[tk.Frame] = None
         self._step_settings_frame: Optional[tk.Frame] = None
+        self._program_controls_frame: Optional[tk.Frame] = None
         self._settings_window: Optional[SettingsWindow] = None
         self._anatomy_window: Optional[JsonViewerProcess] = None
         self._trajectory_summary_btn: Optional[tk.Button] = None
@@ -320,6 +322,10 @@ class MonkeyDriveApp:
             mode_frame, text="Step", variable=self._mode_var,
             value=Config.MODE_STEP, command=self._on_mode_change
         ).pack(side=tk.LEFT, padx=4)
+        tk.Radiobutton(
+            mode_frame, text="Program", variable=self._mode_var,
+            value=Config.MODE_PROGRAM, command=self._on_mode_change
+        ).pack(side=tk.LEFT, padx=4)
 
         self._step_settings_frame = tk.Frame(parent)
         self._step_settings_frame.pack(pady=(0, 10))
@@ -391,6 +397,24 @@ class MonkeyDriveApp:
                 self._step_controls_frame, text=text, command=command, width=9
             ).pack(side=tk.LEFT, padx=2)
 
+        self._program_controls_frame = tk.Frame(parent)
+        self._program_controls_frame.pack(pady=(0, 15))
+
+        program_buttons = [
+            ("Run", self._on_run),
+            ("Pause", self._on_pause),
+            ("Zero", self._on_zero),
+            ("Load Program", self._on_load_program),
+            ("Save Program", self._on_save_program),
+            ("Reset", self._on_reset_program),
+            ("Clear", self._on_clear),
+        ]
+
+        for text, command in program_buttons:
+            tk.Button(
+                self._program_controls_frame, text=text, command=command, width=12
+            ).pack(side=tk.LEFT, padx=2)
+
         self._update_mode_visibility()
 
     def _build_header_row(self):
@@ -414,6 +438,16 @@ class MonkeyDriveApp:
                 (1, "Absolute (mm):"),
                 (2, "Relative (mm):"),
                 (3, "Notes:"),
+            ]
+        elif self._is_program_mode():
+            labels = [
+                (1, "Instructions:"),
+                (2, "Step:"),
+                (3, "Speed (mm/s):"),
+                (4, "Target (mm):"),
+                (5, "Absolute (mm):"),
+                (6, "Relative (mm):"),
+                (7, "Notes:"),
             ]
         else:
             labels = [
@@ -469,6 +503,50 @@ class MonkeyDriveApp:
             absolute_col = 1
             relative_col = 2
             notes_col = 3
+        elif self._is_program_mode():
+            absolute_col = 5
+            relative_col = 6
+            notes_col = 7
+
+            widgets['instructions_button'] = tk.Button(
+                self._motors_container,
+                text=self._instruction_button_text(state),
+                command=lambda mid=state.motor_id: self._on_instructions_click(mid),
+                width=14
+            )
+            widgets['instructions_button'].grid(row=row_index, column=1, sticky='ew', padx=5, pady=Config.ROW_PAD_Y)
+
+            widgets['program_step_var'] = tk.StringVar(value=self._program_step_text(state))
+            widgets['program_step_entry'] = tk.Entry(
+                self._motors_container, textvariable=widgets['program_step_var'],
+                width=Config.ENTRY_WIDTH, state='readonly',
+                readonlybackground=Config.COLOR_READONLY_BG
+            )
+            widgets['program_step_entry'].grid(row=row_index, column=2, sticky='ew', padx=5, pady=Config.ROW_PAD_Y)
+
+            instruction = self._current_instruction(state)
+            widgets['speed_var'] = tk.StringVar(value=f"{instruction.speed:g}" if instruction else "")
+            widgets['speed_entry'] = tk.Entry(
+                self._motors_container, textvariable=widgets['speed_var'],
+                width=Config.ENTRY_WIDTH, state='readonly',
+                readonlybackground=Config.COLOR_READONLY_BG
+            )
+            widgets['speed_entry'].grid(row=row_index, column=3, sticky='ew', padx=5, pady=Config.ROW_PAD_Y)
+
+            widgets['target_var'] = tk.StringVar(value=format_mm(instruction.target) if instruction else "")
+            widgets['target_entry'] = tk.Entry(
+                self._motors_container, textvariable=widgets['target_var'],
+                width=Config.ENTRY_WIDTH, state='readonly',
+                readonlybackground=Config.COLOR_READONLY_BG
+            )
+            widgets['target_entry'].grid(row=row_index, column=4, sticky='ew', padx=5, pady=Config.ROW_PAD_Y)
+
+            visible_widgets.extend([
+                widgets['instructions_button'],
+                widgets['program_step_entry'],
+                widgets['speed_entry'],
+                widgets['target_entry'],
+            ])
         else:
             absolute_col = 3
             relative_col = 4
@@ -557,8 +635,18 @@ class MonkeyDriveApp:
             child.destroy()
         self._motor_widgets.clear()
 
-        min_widths = Config.STEP_COL_MIN_WIDTHS if self._is_step_mode() else Config.COL_MIN_WIDTHS
-        for i in range(max(len(Config.COL_MIN_WIDTHS), len(Config.STEP_COL_MIN_WIDTHS))):
+        if self._is_step_mode():
+            min_widths = Config.STEP_COL_MIN_WIDTHS
+        elif self._is_program_mode():
+            min_widths = Config.PROGRAM_COL_MIN_WIDTHS
+        else:
+            min_widths = Config.COL_MIN_WIDTHS
+        max_columns = max(
+            len(Config.COL_MIN_WIDTHS),
+            len(Config.STEP_COL_MIN_WIDTHS),
+            len(Config.PROGRAM_COL_MIN_WIDTHS),
+        )
+        for i in range(max_columns):
             self._motors_container.grid_columnconfigure(i, weight=0, minsize=0)
         for i, min_w in enumerate(min_widths):
             self._motors_container.grid_columnconfigure(i, weight=1, minsize=min_w)
@@ -581,24 +669,40 @@ class MonkeyDriveApp:
         """Return whether the GUI is currently in step mode."""
         return bool(self._mode_var and self._mode_var.get() == Config.MODE_STEP)
 
+    def _is_program_mode(self) -> bool:
+        """Return whether the GUI is currently in program mode."""
+        return bool(self._mode_var and self._mode_var.get() == Config.MODE_PROGRAM)
+
     def _on_mode_change(self):
-        """Handle switching between target and step modes."""
+        """Handle switching between movement modes."""
         self._update_mode_visibility()
         self._rebuild_motor_rows()
         self._fit_window_to_content()
 
     def _update_mode_visibility(self):
         """Show controls for the selected movement mode."""
-        if not (self._target_controls_frame and self._step_controls_frame and self._step_settings_frame):
+        if not (
+            self._target_controls_frame
+            and self._step_controls_frame
+            and self._step_settings_frame
+            and self._program_controls_frame
+        ):
             return
 
         if self._is_step_mode():
             self._target_controls_frame.pack_forget()
+            self._program_controls_frame.pack_forget()
             self._pack_above_motor_table(self._step_settings_frame, pady=(0, 10))
             self._pack_above_motor_table(self._step_controls_frame, pady=(0, 15))
+        elif self._is_program_mode():
+            self._target_controls_frame.pack_forget()
+            self._step_settings_frame.pack_forget()
+            self._step_controls_frame.pack_forget()
+            self._pack_above_motor_table(self._program_controls_frame, pady=(0, 15))
         else:
             self._step_settings_frame.pack_forget()
             self._step_controls_frame.pack_forget()
+            self._program_controls_frame.pack_forget()
             self._pack_above_motor_table(self._target_controls_frame, pady=(0, 15))
 
     def _pack_above_motor_table(self, frame: tk.Frame, **pack_options):
@@ -607,6 +711,51 @@ class MonkeyDriveApp:
             frame.pack(before=self._motors_container, **pack_options)
         else:
             frame.pack(**pack_options)
+
+    def _current_instruction(self, state: MotorState) -> Optional[InstructionStep]:
+        """Return the current instruction for a motor, if any."""
+        if not state.instructions:
+            return None
+        index = max(0, min(state.instruction_index, len(state.instructions) - 1))
+        return state.instructions[index]
+
+    def _instruction_button_text(self, state: MotorState) -> str:
+        """Return instruction editor button text for one motor."""
+        return "Edit Instructions"
+
+    def _program_step_text(self, state: MotorState) -> str:
+        """Return program progress text for one motor."""
+        if not state.instructions:
+            return ""
+        if state.instruction_status == "complete":
+            return "Complete"
+        index = max(0, min(state.instruction_index, len(state.instructions) - 1))
+        return f"{index + 1}/{len(state.instructions)}"
+
+    def _update_program_row(self, motor_id: int):
+        """Refresh program-mode readouts for one motor."""
+        state = self._get_state(motor_id)
+        widgets = self._get_widgets(motor_id)
+        if not state or not widgets:
+            return
+
+        if 'instructions_button' in widgets:
+            widgets['instructions_button'].configure(text=self._instruction_button_text(state))
+        if 'program_step_var' in widgets:
+            widgets['program_step_var'].set(self._program_step_text(state))
+
+        instruction = self._current_instruction(state)
+        if 'speed_var' in widgets:
+            widgets['speed_var'].set(f"{instruction.speed:g}" if instruction else "")
+        if 'target_var' in widgets:
+            widgets['target_var'].set(format_mm(instruction.target) if instruction else "")
+
+    def _activate_program_instruction(self, state: MotorState, instruction: InstructionStep):
+        """Mirror the active program instruction into the motor's target-mode state."""
+        state.speed = instruction.speed
+        state.target = round(instruction.target, 3)
+        self._sync_trajectory_from_target(state)
+        self._update_trajectory_summary_motor_state(state)
 
     def _bind_numeric_stepper(self, entry: tk.Entry, variable: tk.StringVar,
                               increment: float, decimals: int,
@@ -713,16 +862,13 @@ class MonkeyDriveApp:
         widget = self._event_widget(event)
         if widget and widget.winfo_toplevel() != self._root:
             return None
-        if self._is_step_mode():
+        if self._is_step_mode() or self._is_program_mode():
             return None
         self._on_run()
         return "break"
 
     def _on_pause_shortcut(self, event):
         """Pause selected running motors from the End key."""
-        widget = self._event_widget(event)
-        if widget and widget.winfo_toplevel() != self._root:
-            return None
         self._on_pause()
         return "break"
 
@@ -1096,6 +1242,8 @@ class MonkeyDriveApp:
                 event_type = event.get("type")
                 if event_type == "path_change":
                     self._on_anatomy_path_change(str(event.get("path", "")))
+                elif event_type == "pause_requested":
+                    self._on_pause()
                 elif event_type in ("closed", "exited"):
                     self._anatomy_window = None
                 elif event_type == "error":
@@ -1107,6 +1255,8 @@ class MonkeyDriveApp:
                 if event_type == "save":
                     trajectory = TrajectoryState.from_dict(event.get("trajectory", {}))
                     self._on_trajectory_save(motor_id, trajectory)
+                elif event_type == "pause_requested":
+                    self._on_pause()
                 elif event_type in ("closed", "exited"):
                     self._trajectory_windows.pop(motor_id, None)
                 elif event_type == "error":
@@ -1118,7 +1268,9 @@ class MonkeyDriveApp:
         if self._trajectory_summary_window:
             for event in self._trajectory_summary_window.poll_events():
                 event_type = event.get("type")
-                if event_type in ("closed", "exited"):
+                if event_type == "pause_requested":
+                    self._on_pause()
+                elif event_type in ("closed", "exited"):
                     self._trajectory_summary_window = None
                 elif event_type == "error":
                     logger.error("Trajectory summary error: %s", event.get("message"))
@@ -1199,7 +1351,7 @@ class MonkeyDriveApp:
         state = self._get_state(motor_id)
         widgets = self._get_widgets(motor_id)
         if state and widgets:
-            widgets['target_var'].set(format_mm(state.target) if state.target else "")
+            widgets['target_var'].set(format_mm(state.target))
 
     def _enable_absolute_edit(self, motor_id: int):
         """Enable editing of absolute position field."""
@@ -1310,6 +1462,49 @@ class MonkeyDriveApp:
         if motor_id in self._notes_windows:
             del self._notes_windows[motor_id]
 
+    def _on_instructions_click(self, motor_id: int):
+        """Open instructions editor for one motor."""
+        state = self._get_state(motor_id)
+        if not state:
+            return
+
+        window = InstructionsWindow(
+            self._root,
+            motor_id,
+            state.instructions,
+            self._min_speed,
+            self._max_speed,
+            self._on_instructions_save,
+        )
+        window.grab_set()
+
+    def _on_instructions_save(self, motor_id: int, instructions: list[InstructionStep]):
+        """Save edited instructions for one motor."""
+        state = self._get_state(motor_id)
+        if not state:
+            return
+
+        previous_index = state.instruction_index
+        previous_status = state.instruction_status
+        if state.is_running:
+            self._serial_manager.send(SerialProtocol.cmd_pause(state.motor_id))
+            state.is_running = False
+            previous_status = "paused"
+
+        state.instructions = instructions
+        if state.instructions:
+            state.instruction_index = min(previous_index, len(state.instructions) - 1)
+            state.instruction_status = previous_status if previous_status != "running" else "paused"
+            if state.instruction_status in ("paused", "running"):
+                instruction = self._current_instruction(state)
+                if instruction:
+                    self._activate_program_instruction(state, instruction)
+        else:
+            state.instruction_index = 0
+            state.instruction_status = "idle"
+        self._update_program_row(motor_id)
+        self._save_state()
+
     def _on_trajectory_click(self, motor_id: int):
         """Open the trajectory viewer for one motor."""
         state = self._get_state(motor_id)
@@ -1408,7 +1603,7 @@ class MonkeyDriveApp:
         state.target = target
         widgets = self._get_widgets(state.motor_id)
         if widgets and 'target_var' in widgets:
-            widgets['target_var'].set(format_mm(state.target) if state.target else "")
+            widgets['target_var'].set(format_mm(state.target))
 
     def _sync_trajectory_from_target(self, state: MotorState):
         """Convert a motor target position into the MRI target line position."""
@@ -1462,6 +1657,9 @@ class MonkeyDriveApp:
                 if state.is_running:
                     self._serial_manager.send(SerialProtocol.cmd_pause(state.motor_id))
                     state.is_running = False
+                    if state.instruction_status == "running":
+                        state.instruction_status = "paused"
+                        self._update_program_row(state.motor_id)
             self._serial_manager.disconnect()
             self._step_targets.clear()
             self._connect_btn.config(text="Connect")
@@ -1481,6 +1679,9 @@ class MonkeyDriveApp:
         """Handle connection lost callback from serial manager."""
         self._reset_step_key_state()
         for state in self._motor_states:
+            if state.instruction_status == "running":
+                state.instruction_status = "paused"
+                self._update_program_row(state.motor_id)
             state.is_running = False
         self._step_targets.clear()
         self._root.after(0, self._show_connection_lost_dialog)
@@ -1544,6 +1745,10 @@ class MonkeyDriveApp:
         if not self._validate_absolute_edits_closed(selected):
             return
 
+        if self._is_program_mode():
+            self._run_program_instructions(selected)
+            return
+
         # Validation pass
         for state in selected:
             widgets = self._get_widgets(state.motor_id)
@@ -1565,7 +1770,7 @@ class MonkeyDriveApp:
             try:
                 t_val = float(widgets['target_var'].get())
                 state.target = round(t_val, 3)
-                widgets['target_var'].set(format_mm(state.target) if state.target else "")
+                widgets['target_var'].set(format_mm(state.target))
             except ValueError:
                 self._safe_popup(
                     messagebox.showwarning, "Invalid Input",
@@ -1605,6 +1810,58 @@ class MonkeyDriveApp:
             )
             self._serial_manager.send(cmd)
             state.is_running = True
+
+    def _run_program_instructions(self, selected: list[MotorState]):
+        """Run or continue selected motors' active instructions."""
+        runnable: list[tuple[MotorState, InstructionStep]] = []
+        skipped_complete = 0
+
+        for state in selected:
+            if not state.instructions:
+                self._safe_popup(
+                    messagebox.showwarning,
+                    "Missing Instructions",
+                    f"Motor {state.motor_id} has no instructions."
+                )
+                return
+
+            if state.instruction_status == "complete":
+                skipped_complete += 1
+                continue
+
+            instruction = self._current_instruction(state)
+            if not instruction:
+                continue
+
+            if not (self._min_speed <= instruction.speed <= self._max_speed):
+                self._safe_popup(
+                    messagebox.showwarning,
+                    "Invalid Instructions",
+                    f"Motor {state.motor_id} instruction speed is outside the current settings range."
+                )
+                return
+            if not (Config.MIN_TARGET_POS <= instruction.target <= Config.MAX_TARGET_POS):
+                self._safe_popup(
+                    messagebox.showwarning,
+                    "Invalid Instructions",
+                    f"Motor {state.motor_id} instruction target is outside the allowed range."
+                )
+                return
+
+            runnable.append((state, instruction))
+
+        if not runnable and skipped_complete:
+            return
+
+        for state, instruction in runnable:
+            self._activate_program_instruction(state, instruction)
+            cmd = SerialProtocol.cmd_run(
+                state.motor_id, state.speed, state.target, state.absolute
+            )
+            self._serial_manager.send(cmd)
+            state.is_running = True
+            state.instruction_status = "running"
+            self._update_program_row(state.motor_id)
 
     def _on_step(self, direction: int):
         """Move selected motors by one global step."""
@@ -1653,6 +1910,9 @@ class MonkeyDriveApp:
         for state in selected:
             self._serial_manager.send(SerialProtocol.cmd_pause(state.motor_id))
             state.is_running = False
+            if state.instruction_status == "running":
+                state.instruction_status = "paused"
+                self._update_program_row(state.motor_id)
             self._step_targets.pop(state.motor_id, None)
 
     def _on_zero(self):
@@ -1675,6 +1935,9 @@ class MonkeyDriveApp:
                 if state.is_running:
                     self._serial_manager.send(SerialProtocol.cmd_pause(state.motor_id))
                     state.is_running = False
+                    if state.instruction_status == "running":
+                        state.instruction_status = "paused"
+                        self._update_program_row(state.motor_id)
 
         # Suspend heartbeat checking during the blocking file dialog
         self._serial_manager.heartbeat_suspended = True
@@ -1721,6 +1984,136 @@ class MonkeyDriveApp:
             if self._serial_manager.is_connected:
                 self._serial_manager.last_heartbeat_received = time.time()
 
+    def _on_load_program(self):
+        """Open the program loader dialog."""
+        recent_programs = [path for path in self._recent_programs if Path(path).exists()]
+        if recent_programs != self._recent_programs:
+            self._recent_programs = recent_programs
+            self._save_state()
+
+        window = ProgramLoadWindow(
+            self._root,
+            recent_programs,
+            self._load_program_file,
+        )
+        self._style_widget_tree(window)
+        window.grab_set()
+
+    def _load_program_file(self, filepath: str):
+        """Load a CSV program containing instructions for one or more motors."""
+        if not filepath:
+            return
+
+        try:
+            grouped: dict[int, list[tuple[int, InstructionStep]]] = {}
+            with open(filepath, 'r', newline='', encoding='utf-8') as f:
+                reader = csv.DictReader(f)
+                required = {'motor', 'target_mm', 'speed_mm_s'}
+                if not reader.fieldnames or not required.issubset(set(reader.fieldnames)):
+                    raise ValueError("Program CSV must include motor, target_mm, and speed_mm_s columns.")
+
+                for row_number, row in enumerate(reader, start=2):
+                    motor_id = int(row['motor'])
+                    step_number = int(row.get('step') or len(grouped.get(motor_id, [])) + 1)
+                    target = round(float(row['target_mm']), 3)
+                    speed = float(row['speed_mm_s'])
+                    notes = row.get('notes', '').strip()
+
+                    if not self._get_state(motor_id):
+                        raise ValueError(f"Row {row_number}: Motor {motor_id} does not exist in the GUI.")
+                    if not (Config.MIN_TARGET_POS <= target <= Config.MAX_TARGET_POS):
+                        raise ValueError(f"Row {row_number}: target {target:.3f} mm is out of range.")
+                    if not (self._min_speed <= speed <= self._max_speed):
+                        raise ValueError(f"Row {row_number}: speed {speed:g} mm/s is out of range.")
+
+                    grouped.setdefault(motor_id, []).append((
+                        step_number,
+                        InstructionStep(target=target, speed=speed, notes=notes),
+                    ))
+
+            for state in self._motor_states:
+                if state.is_running:
+                    self._serial_manager.send(SerialProtocol.cmd_pause(state.motor_id))
+                    state.is_running = False
+                state.instructions = []
+                state.instruction_index = 0
+                state.instruction_status = "idle"
+
+            for motor_id, entries in grouped.items():
+                state = self._get_state(motor_id)
+                if not state:
+                    continue
+                entries.sort(key=lambda item: item[0])
+                state.instructions = [step for _step_number, step in entries]
+                state.instruction_index = 0
+                state.instruction_status = "idle"
+
+            for state in self._motor_states:
+                self._update_program_row(state.motor_id)
+
+            self._remember_program_path(filepath)
+            self._save_state()
+            messagebox.showinfo("Program Loaded", f"Loaded program:\n{filepath}")
+        except (OSError, ValueError) as exc:
+            messagebox.showerror("Load Program Failed", str(exc))
+
+    def _remember_program_path(self, filepath: str):
+        """Add a successfully loaded program path to recent programs."""
+        path = str(Path(filepath).expanduser())
+        self._recent_programs = [
+            existing for existing in self._recent_programs
+            if existing != path and Path(existing).exists()
+        ]
+        self._recent_programs.insert(0, path)
+        self._recent_programs = self._recent_programs[:10]
+
+    def _on_save_program(self):
+        """Save current per-motor instructions as one CSV program."""
+        filepath = filedialog.asksaveasfilename(
+            parent=self._root,
+            title="Save Program",
+            defaultextension=".csv",
+            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
+            initialfile=f"monkeydrive_program_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+        )
+        if not filepath:
+            return
+
+        try:
+            with open(filepath, 'w', newline='', encoding='utf-8') as f:
+                writer = csv.writer(f)
+                writer.writerow(["motor", "step", "target_mm", "speed_mm_s", "notes"])
+                for state in self._motor_states:
+                    for index, instruction in enumerate(state.instructions, start=1):
+                        writer.writerow([
+                            state.motor_id,
+                            index,
+                            f"{instruction.target:.3f}",
+                            f"{instruction.speed:.6f}",
+                            instruction.notes,
+                        ])
+            messagebox.showinfo("Program Saved", f"Saved program to:\n{filepath}")
+        except OSError as exc:
+            messagebox.showerror("Save Program Failed", str(exc))
+
+    def _on_reset_program(self):
+        """Reset selected motors' instruction progress to the first step."""
+        selected = [s for s in self._motor_states if s.is_selected]
+        if not selected:
+            self._safe_popup(messagebox.showinfo, "No Selection", "Select at least one motor.")
+            return
+
+        for state in selected:
+            if state.is_running:
+                self._serial_manager.send(SerialProtocol.cmd_pause(state.motor_id))
+                state.is_running = False
+            state.instruction_index = 0
+            state.instruction_status = "idle"
+            self._step_targets.pop(state.motor_id, None)
+            self._update_program_row(state.motor_id)
+
+        self._save_state()
+
     def _on_clear(self):
         """Clear selected motors - pause if running, then wipe values."""
         selected = [s for s in self._motor_states if s.is_selected]
@@ -1743,6 +2136,9 @@ class MonkeyDriveApp:
             state.relative_zero_point = 0.0
             state.notes = ""
             state.is_running = False
+            state.instructions = []
+            state.instruction_index = 0
+            state.instruction_status = "idle"
 
             widgets = self._get_widgets(state.motor_id)
             if widgets:
@@ -1750,6 +2146,10 @@ class MonkeyDriveApp:
                     widgets['speed_var'].set("")
                 if 'target_var' in widgets:
                     widgets['target_var'].set("")
+                if 'program_step_var' in widgets:
+                    widgets['program_step_var'].set("")
+                if 'instructions_button' in widgets:
+                    widgets['instructions_button'].configure(text=self._instruction_button_text(state))
                 widgets['absolute_var'].set("0.000")
                 widgets['relative_var'].set("0.000")
                 widgets['notes_var'].set("")
@@ -1776,11 +2176,47 @@ class MonkeyDriveApp:
         state = self._get_state(motor_id)
         widgets = self._get_widgets(motor_id)
         if state and widgets:
+            self._advance_program_if_ready(state)
             if widgets['absolute_entry']['state'] == 'readonly':
                 widgets['absolute_var'].set(format_mm(state.absolute))
             if widgets['relative_entry']['state'] == 'readonly':
                 widgets['relative_var'].set(format_mm(state.relative))
             self._update_trajectory_motor_position(motor_id)
+
+    def _advance_program_if_ready(self, state: MotorState):
+        """Advance one motor's instructions when the current target is reached."""
+        if state.instruction_status != "running" or not state.instructions:
+            return
+
+        instruction = self._current_instruction(state)
+        if not instruction:
+            return
+
+        if abs(state.absolute - instruction.target) > Config.PROGRAM_TARGET_TOLERANCE_MM:
+            return
+
+        if state.instruction_index + 1 >= len(state.instructions):
+            state.is_running = False
+            state.instruction_status = "complete"
+            self._update_program_row(state.motor_id)
+            return
+
+        state.instruction_index += 1
+        next_instruction = self._current_instruction(state)
+        if next_instruction:
+            self._activate_program_instruction(state, next_instruction)
+        self._update_program_row(state.motor_id)
+        if not next_instruction or not self._serial_manager.is_connected:
+            return
+
+        cmd = SerialProtocol.cmd_run(
+            state.motor_id,
+            state.speed,
+            state.target,
+            state.absolute,
+        )
+        self._serial_manager.send(cmd)
+        state.is_running = True
 
     def _update_trajectory_motor_position(self, motor_id: int):
         """Notify an open trajectory viewer that its motor position changed."""
@@ -1852,6 +2288,7 @@ class MonkeyDriveApp:
                 'max_speed': self._max_speed,
                 'backlash': round(self._backlash, 3),
                 'anatomy_path': self._saved_anatomy_path,
+                'recent_programs': self._recent_programs[:10],
             }
             with open(self._get_data_path(), 'w', encoding='utf-8') as f:
                 json.dump(data, f, indent=2)
@@ -1872,13 +2309,16 @@ class MonkeyDriveApp:
 
                 for state in self._motor_states:
                     state.is_running = False
+                    if state.instruction_status == "running":
+                        state.instruction_status = "paused"
                     state.target = round(state.target, 3)
                     state.absolute = round(state.absolute, 3)
                     state.relative = round(state.relative, 3)
                     state.relative_zero_point = round(state.relative_zero_point, 3)
 
                 mode = data.get('mode', Config.MODE_TARGET)
-                self._saved_mode = mode if mode in (Config.MODE_TARGET, Config.MODE_STEP) else Config.MODE_TARGET
+                valid_modes = (Config.MODE_TARGET, Config.MODE_STEP, Config.MODE_PROGRAM)
+                self._saved_mode = mode if mode in valid_modes else Config.MODE_TARGET
                 self._saved_port = str(data.get('port', ""))
                 self._saved_step_speed = float(data.get('step_speed', Config.DEFAULT_STEP_SPEED))
                 self._saved_step_size = round(float(data.get('step_size', Config.DEFAULT_STEP_SIZE)), 3)
@@ -1886,6 +2326,14 @@ class MonkeyDriveApp:
                 self._max_speed = float(data.get('max_speed', Config.MAX_SPEED))
                 self._backlash = round(float(data.get('backlash', Config.DEFAULT_BACKLASH_MM)), 3)
                 self._saved_anatomy_path = str(data.get('anatomy_path', ""))
+                recent_programs = data.get('recent_programs', [])
+                if isinstance(recent_programs, list):
+                    self._recent_programs = [
+                        str(path) for path in recent_programs
+                        if isinstance(path, str) and Path(path).exists()
+                    ][:10]
+                else:
+                    self._recent_programs = []
 
                 if self._min_speed <= 0 or self._max_speed < self._min_speed or self._backlash < 0:
                     raise ValueError("Invalid persisted settings")
@@ -1902,6 +2350,7 @@ class MonkeyDriveApp:
             self._max_speed = Config.MAX_SPEED
             self._backlash = Config.DEFAULT_BACKLASH_MM
             self._saved_anatomy_path = ""
+            self._recent_programs = []
 
     def _schedule_auto_save(self):
         """Schedule periodic auto-save of state."""

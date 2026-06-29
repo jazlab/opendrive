@@ -72,6 +72,7 @@ def main() -> int:
             on_save,
         )
         viewer.protocol("WM_DELETE_WINDOW", close)
+        root.bind_all("<End>", lambda _event: (_emit({"type": "pause_requested"}), "break")[1])
 
         def poll_commands():
             while True:
