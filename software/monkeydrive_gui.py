@@ -57,6 +57,7 @@ class MonkeyDriveApp:
         self._trajectory_windows: dict = {}
         self._trajectory_summary_window: Optional[JsonViewerProcess] = None
         self._saved_mode: str = Config.MODE_TARGET
+        self._saved_port: str = ""
         self._saved_step_speed: float = Config.DEFAULT_STEP_SPEED
         self._saved_step_size: float = Config.DEFAULT_STEP_SIZE
         self._saved_anatomy_path: str = ""
@@ -98,7 +99,7 @@ class MonkeyDriveApp:
 
         # Build UI
         self._build_ui()
-        self._bind_step_mode_shortcuts()
+        self._bind_keyboard_shortcuts()
 
         # Ensure at least one motor
         if len(self._motor_states) == 0:
@@ -261,35 +262,45 @@ class MonkeyDriveApp:
         port_frame = tk.Frame(parent)
         port_frame.pack(fill=tk.X, pady=(0, 10))
 
-        tk.Label(port_frame, text="Port:").pack(side=tk.LEFT)
+        port_row = tk.Frame(port_frame)
+        port_row.pack(fill=tk.X)
 
-        self._port_var = tk.StringVar()
+        tk.Label(port_row, text="Port:").pack(side=tk.LEFT)
+
+        self._port_var = tk.StringVar(value=self._saved_port)
         self._port_combo = ttk.Combobox(
-            port_frame, textvariable=self._port_var,
+            port_row, textvariable=self._port_var,
             width=40, state='readonly'
         )
+        if self._saved_port:
+            self._port_combo['values'] = [self._saved_port]
         self._port_combo.pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
         self._port_combo.bind('<Button-1>', self._refresh_ports)
 
-        action_frame = tk.Frame(port_frame)
-        action_frame.pack(side=tk.RIGHT)
-
+        utility_button_width = 18
         self._connect_btn = tk.Button(
-            port_frame, text="Connect", command=self._on_connect
+            port_row, text="Connect", command=self._on_connect,
+            width=utility_button_width
         )
-        self._connect_btn.pack(in_=action_frame, fill=tk.X)
+        self._connect_btn.pack(side=tk.LEFT, padx=(4, 0))
+
+        action_frame = tk.Frame(port_frame)
+        action_frame.pack(anchor='e', pady=(4, 0))
 
         tk.Button(
-            action_frame, text="Settings", command=self._on_settings
+            action_frame, text="Settings", command=self._on_settings,
+            width=utility_button_width
         ).pack(fill=tk.X, pady=(4, 0))
 
         tk.Button(
-            action_frame, text="Anatomy", command=self._on_anatomy
+            action_frame, text="Anatomy", command=self._on_anatomy,
+            width=utility_button_width
         ).pack(fill=tk.X, pady=(4, 0))
 
         self._trajectory_summary_btn = tk.Button(
             action_frame, text="Trajectory Summary", command=self._on_trajectory_summary,
-            state=tk.NORMAL if self._has_loaded_anatomy() else tk.DISABLED
+            state=tk.NORMAL if self._has_loaded_anatomy() else tk.DISABLED,
+            width=utility_button_width
         )
         self._trajectory_summary_btn.pack(fill=tk.X, pady=(4, 0))
 
@@ -687,10 +698,33 @@ class MonkeyDriveApp:
 
         return "break"
 
-    def _bind_step_mode_shortcuts(self):
-        """Bind keyboard shortcuts used in step mode."""
+    def _bind_keyboard_shortcuts(self):
+        """Bind global keyboard shortcuts for movement commands."""
         self._root.bind_all('<KeyPress>', self._on_keypress)
         self._root.bind_all('<KeyRelease>', self._on_keyrelease)
+        self._root.bind_all('<Command-Return>', self._on_run_shortcut)
+        self._root.bind_all('<Command-KP_Enter>', self._on_run_shortcut)
+        self._root.bind_all('<Control-Return>', self._on_run_shortcut)
+        self._root.bind_all('<Control-KP_Enter>', self._on_run_shortcut)
+        self._root.bind_all('<End>', self._on_pause_shortcut)
+
+    def _on_run_shortcut(self, event):
+        """Run selected motors in target mode from Command/Ctrl+Enter."""
+        widget = self._event_widget(event)
+        if widget and widget.winfo_toplevel() != self._root:
+            return None
+        if self._is_step_mode():
+            return None
+        self._on_run()
+        return "break"
+
+    def _on_pause_shortcut(self, event):
+        """Pause selected running motors from the End key."""
+        widget = self._event_widget(event)
+        if widget and widget.winfo_toplevel() != self._root:
+            return None
+        self._on_pause()
+        return "break"
 
     def _on_keypress(self, event):
         """Handle step-mode keyboard shortcuts."""
@@ -795,9 +829,7 @@ class MonkeyDriveApp:
         target = Config.MAX_TARGET_POS if self._active_step_direction > 0 else Config.MIN_TARGET_POS
 
         for state in selected:
-            state.speed = speed
-            state.target = target
-            self._step_targets.pop(state.motor_id, None)
+            self._step_targets[state.motor_id] = target
             cmd = SerialProtocol.cmd_run(state.motor_id, speed, target, state.absolute)
             self._serial_manager.send(cmd)
             state.is_running = True
@@ -1410,6 +1442,9 @@ class MonkeyDriveApp:
     def _refresh_ports(self, event=None):
         """Refresh the list of available serial ports."""
         ports = SerialManager.list_ports()
+        current = self._port_var.get() if self._port_var else ""
+        if current and current not in ports:
+            ports.insert(0, current)
         self._port_combo['values'] = ports
 
     def _on_connect(self):
@@ -1418,6 +1453,7 @@ class MonkeyDriveApp:
         if not port:
             messagebox.showwarning("No Port", "Please select a port.")
             return
+        self._saved_port = port
 
         if self._serial_manager.is_connected:
             # Pause all running motors before disconnecting
@@ -1434,6 +1470,7 @@ class MonkeyDriveApp:
             if self._serial_manager.connect(port):
                 self._send_settings_to_controller()
                 self._connect_btn.config(text="Disconnect")
+                self._save_state()
                 messagebox.showinfo("Connected", f"Connected to {port}")
                 self._focus_main_window()
             else:
@@ -1602,9 +1639,7 @@ class MonkeyDriveApp:
             target_updates.append((state, target))
 
         for state, target in target_updates:
-            state.speed = speed
-            state.target = target
-            self._step_targets.pop(state.motor_id, None)
+            self._step_targets[state.motor_id] = target
             cmd = SerialProtocol.cmd_run(state.motor_id, speed, target, state.absolute)
             self._serial_manager.send(cmd)
             state.is_running = True
@@ -1809,7 +1844,7 @@ class MonkeyDriveApp:
         try:
             data = {
                 'motor_states': [s.to_dict() for s in self._motor_states],
-                'port': self._port_var.get() if self._port_var else "",
+                'port': self._port_var.get() if self._port_var else self._saved_port,
                 'mode': self._mode_var.get() if self._mode_var else self._saved_mode,
                 'step_speed': self._step_speed_var.get() if self._step_speed_var else f"{self._saved_step_speed:g}",
                 'step_size': self._step_size_var.get() if self._step_size_var else format_mm(self._saved_step_size),
@@ -1844,6 +1879,7 @@ class MonkeyDriveApp:
 
                 mode = data.get('mode', Config.MODE_TARGET)
                 self._saved_mode = mode if mode in (Config.MODE_TARGET, Config.MODE_STEP) else Config.MODE_TARGET
+                self._saved_port = str(data.get('port', ""))
                 self._saved_step_speed = float(data.get('step_speed', Config.DEFAULT_STEP_SPEED))
                 self._saved_step_size = round(float(data.get('step_size', Config.DEFAULT_STEP_SIZE)), 3)
                 self._min_speed = float(data.get('min_speed', Config.MIN_SPEED))
@@ -1859,6 +1895,7 @@ class MonkeyDriveApp:
         except ValueError as e:
             logger.error("Failed to load step settings: %s", e)
             self._saved_mode = Config.MODE_TARGET
+            self._saved_port = ""
             self._saved_step_speed = Config.DEFAULT_STEP_SPEED
             self._saved_step_size = Config.DEFAULT_STEP_SIZE
             self._min_speed = Config.MIN_SPEED

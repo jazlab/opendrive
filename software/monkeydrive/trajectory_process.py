@@ -41,6 +41,7 @@ def main() -> int:
     root = tk.Tk()
     root.withdraw()
     viewer = None
+    closed = False
 
     def on_save(motor_id: int, trajectory: TrajectoryState):
         _emit({
@@ -50,8 +51,15 @@ def main() -> int:
         })
 
     def close():
+        nonlocal closed
+        if closed:
+            return
+        closed = True
         _emit({"type": "closed", "motor_id": args.motor_id})
-        root.destroy()
+        try:
+            root.destroy()
+        except tk.TclError:
+            pass
 
     try:
         trajectory = TrajectoryState.from_dict(json.loads(args.trajectory_json))

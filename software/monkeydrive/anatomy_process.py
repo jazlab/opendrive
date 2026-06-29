@@ -37,13 +37,21 @@ def main() -> int:
     root = tk.Tk()
     root.withdraw()
     viewer = None
+    closed = False
 
     def on_path_change(path: str):
         _emit({"type": "path_change", "path": path})
 
     def close():
+        nonlocal closed
+        if closed:
+            return
+        closed = True
         _emit({"type": "closed"})
-        root.destroy()
+        try:
+            root.destroy()
+        except tk.TclError:
+            pass
 
     try:
         viewer = AnatomyViewer(root, initial_path=args.initial_path, on_path_change=on_path_change)

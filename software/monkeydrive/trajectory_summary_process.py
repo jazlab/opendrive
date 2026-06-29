@@ -39,10 +39,18 @@ def main() -> int:
     root = tk.Tk()
     root.withdraw()
     viewer = None
+    closed = False
 
     def close():
+        nonlocal closed
+        if closed:
+            return
+        closed = True
         _emit({"type": "closed"})
-        root.destroy()
+        try:
+            root.destroy()
+        except tk.TclError:
+            pass
 
     try:
         motor_states = [
