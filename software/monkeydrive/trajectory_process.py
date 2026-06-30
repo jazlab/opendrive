@@ -11,12 +11,26 @@ import traceback
 
 import tkinter as tk
 
+from .anatomy import AnatomyDependencyError, _import_numpy
 from .models import TrajectoryState
 from .trajectory_viewer import TrajectoryViewer
 
 
 def _emit(message: dict):
     print(json.dumps(message), flush=True)
+
+
+def _preload_mri_dependencies():
+    """Import MRI libraries before starting subprocess helper threads."""
+    _import_numpy()
+    try:
+        import nibabel  # noqa: F401
+        import pydicom  # noqa: F401
+    except ImportError as exc:
+        raise AnatomyDependencyError(
+            "MRI support requires numpy, nibabel, and pydicom. "
+            "Install the packages in software/requirements.txt."
+        ) from exc
 
 
 def main() -> int:
@@ -26,6 +40,12 @@ def main() -> int:
     parser.add_argument("--anatomy-path", required=True)
     parser.add_argument("--trajectory-json", required=True)
     args = parser.parse_args()
+
+    try:
+        _preload_mri_dependencies()
+    except AnatomyDependencyError as exc:
+        _emit({"type": "error", "message": str(exc), "motor_id": args.motor_id})
+        return 1
 
     commands: queue.Queue = queue.Queue()
 
