@@ -50,6 +50,8 @@ class Config:
     COLOR_READONLY_BG: str = "#d9d9d9"
     COLOR_ACTIVE_BG: str = "#e5e5e5"
     COLOR_SELECT_BG: str = "#4a90e2"
+    COLOR_ROW_SELECTED_BG: str = "#cfe3ff"
+    COLOR_MODE_TAB_BG: str = "#d9d9d9"
 
     # Column Weights and Min Sizes for Grid Layout
     # Col 0: Buttons/ID | Col 1: Speed | Col 2: Target | Col 3: Abs | Col 4: Rel | Col 5: Notes

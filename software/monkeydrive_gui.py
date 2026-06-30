@@ -83,6 +83,7 @@ class MonkeyDriveApp:
         self._port_combo: Optional[ttk.Combobox] = None
         self._connect_btn: Optional[tk.Button] = None
         self._mode_var: Optional[tk.StringVar] = None
+        self._mode_buttons: dict[str, tk.Button] = {}
         self._step_speed_var: Optional[tk.StringVar] = None
         self._step_size_var: Optional[tk.StringVar] = None
         self._step_speed_entry: Optional[tk.Entry] = None
@@ -188,7 +189,8 @@ class MonkeyDriveApp:
             if isinstance(widget, (tk.Tk, tk.Toplevel, tk.Frame)):
                 widget.configure(background=Config.COLOR_BG)
             elif isinstance(widget, tk.Label):
-                widget.configure(background=Config.COLOR_BG, foreground=Config.COLOR_FG)
+                if getattr(widget, "_monkeydrive_role", "") != "mode_tab":
+                    widget.configure(background=Config.COLOR_BG, foreground=Config.COLOR_FG)
             elif isinstance(widget, tk.Checkbutton):
                 widget.configure(
                     background=Config.COLOR_BG,
@@ -206,13 +208,18 @@ class MonkeyDriveApp:
                     selectcolor=Config.COLOR_ENTRY_BG,
                 )
             elif isinstance(widget, tk.Button):
-                widget.configure(
-                    background=Config.COLOR_ENTRY_BG,
-                    foreground=Config.COLOR_FG,
-                    activebackground=Config.COLOR_ACTIVE_BG,
-                    activeforeground=Config.COLOR_FG,
-                    highlightbackground=Config.COLOR_BG,
-                )
+                role = getattr(widget, "_monkeydrive_role", "")
+                if role == "mode":
+                    pass
+                else:
+                    widget.configure(
+                        background=Config.COLOR_ENTRY_BG,
+                        foreground=Config.COLOR_FG,
+                        activebackground=Config.COLOR_ACTIVE_BG,
+                        activeforeground=Config.COLOR_FG,
+                        highlightbackground=Config.COLOR_BG,
+                        borderwidth=1,
+                    )
             elif isinstance(widget, tk.Entry):
                 readonly_bg = widget.cget("readonlybackground")
                 widget.configure(
@@ -234,6 +241,9 @@ class MonkeyDriveApp:
         for child in widget.winfo_children():
             self._style_widget_tree(child)
 
+        if widget is self._root:
+            self._refresh_mode_buttons()
+
     def _fit_window_to_content(self):
         """Resize the fixed-size window to match the current layout."""
         self._root.update_idletasks()
@@ -249,11 +259,18 @@ class MonkeyDriveApp:
         main_frame = tk.Frame(self._root, padx=15, pady=15)
         main_frame.pack(fill=tk.BOTH, expand=True)
 
-        # Row 0: Port selection
-        self._build_port_selection(main_frame)
+        top_frame = tk.Frame(main_frame)
+        top_frame.pack(fill=tk.X, pady=(0, 12))
 
-        # Row 1: Main buttons (centered)
-        self._build_control_buttons(main_frame)
+        primary_frame = tk.Frame(top_frame)
+        primary_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 16))
+
+        utility_frame = tk.Frame(top_frame)
+        utility_frame.pack(side=tk.RIGHT, anchor='ne')
+
+        self._build_port_selection(primary_frame)
+        self._build_control_buttons(primary_frame)
+        self._build_utility_buttons(utility_frame)
 
         # Container for Headers and Motor Rows (Grid Layout)
         self._motors_container = tk.Frame(main_frame)
@@ -264,14 +281,11 @@ class MonkeyDriveApp:
         port_frame = tk.Frame(parent)
         port_frame.pack(fill=tk.X, pady=(0, 10))
 
-        port_row = tk.Frame(port_frame)
-        port_row.pack(fill=tk.X)
-
-        tk.Label(port_row, text="Port:").pack(side=tk.LEFT)
+        tk.Label(port_frame, text="Port:").pack(side=tk.LEFT)
 
         self._port_var = tk.StringVar(value=self._saved_port)
         self._port_combo = ttk.Combobox(
-            port_row, textvariable=self._port_var,
+            port_frame, textvariable=self._port_var,
             width=40, state='readonly'
         )
         if self._saved_port:
@@ -279,53 +293,59 @@ class MonkeyDriveApp:
         self._port_combo.pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
         self._port_combo.bind('<Button-1>', self._refresh_ports)
 
+    def _build_utility_buttons(self, parent: tk.Frame):
+        """Build connection and utility buttons."""
         utility_button_width = 18
         self._connect_btn = tk.Button(
-            port_row, text="Connect", command=self._on_connect,
+            parent, text="Connect", command=self._on_connect,
             width=utility_button_width
         )
-        self._connect_btn.pack(side=tk.LEFT, padx=(4, 0))
-
-        action_frame = tk.Frame(port_frame)
-        action_frame.pack(anchor='e', pady=(4, 0))
+        self._connect_btn.pack(fill=tk.X)
 
         tk.Button(
-            action_frame, text="Settings", command=self._on_settings,
+            parent, text="Settings", command=self._on_settings,
             width=utility_button_width
-        ).pack(fill=tk.X, pady=(4, 0))
+        ).pack(fill=tk.X, pady=(8, 0))
 
         tk.Button(
-            action_frame, text="Anatomy", command=self._on_anatomy,
+            parent, text="Anatomy", command=self._on_anatomy,
             width=utility_button_width
-        ).pack(fill=tk.X, pady=(4, 0))
+        ).pack(fill=tk.X, pady=(8, 0))
 
         self._trajectory_summary_btn = tk.Button(
-            action_frame, text="Trajectory Summary", command=self._on_trajectory_summary,
+            parent, text="Trajectory Summary", command=self._on_trajectory_summary,
             state=tk.NORMAL if self._has_loaded_anatomy() else tk.DISABLED,
             width=utility_button_width
         )
-        self._trajectory_summary_btn.pack(fill=tk.X, pady=(4, 0))
+        self._trajectory_summary_btn.pack(fill=tk.X, pady=(8, 0))
 
     def _build_control_buttons(self, parent: tk.Frame):
         """Build the main control buttons."""
         mode_frame = tk.Frame(parent)
-        mode_frame.pack(pady=(0, 8))
+        mode_frame.pack(pady=(4, 8))
 
         tk.Label(mode_frame, text="Mode:").pack(side=tk.LEFT, padx=(0, 8))
 
         self._mode_var = tk.StringVar(value=self._saved_mode)
-        tk.Radiobutton(
-            mode_frame, text="Target", variable=self._mode_var,
-            value=Config.MODE_TARGET, command=self._on_mode_change
-        ).pack(side=tk.LEFT, padx=4)
-        tk.Radiobutton(
-            mode_frame, text="Step", variable=self._mode_var,
-            value=Config.MODE_STEP, command=self._on_mode_change
-        ).pack(side=tk.LEFT, padx=4)
-        tk.Radiobutton(
-            mode_frame, text="Program", variable=self._mode_var,
-            value=Config.MODE_PROGRAM, command=self._on_mode_change
-        ).pack(side=tk.LEFT, padx=4)
+        self._mode_buttons = {}
+        for label, value in (
+            ("Target", Config.MODE_TARGET),
+            ("Step", Config.MODE_STEP),
+            ("Program", Config.MODE_PROGRAM),
+        ):
+            button = tk.Label(
+                mode_frame,
+                text=label,
+                width=10,
+                padx=12,
+                pady=5,
+                cursor="hand2",
+            )
+            button._monkeydrive_role = "mode_tab"
+            button.bind("<Button-1>", lambda _event, mode=value: self._select_mode(mode))
+            button.pack(side=tk.LEFT)
+            self._mode_buttons[value] = button
+        self._refresh_mode_buttons()
 
         self._step_settings_frame = tk.Frame(parent)
         self._step_settings_frame.pack(pady=(0, 10))
@@ -367,55 +387,74 @@ class MonkeyDriveApp:
         self._target_controls_frame = tk.Frame(parent)
         self._target_controls_frame.pack(pady=(0, 15))
 
-        target_buttons = [
-            ("Run", self._on_run),
-            ("Pause", self._on_pause),
-            ("Zero", self._on_zero),
-            ("Export", self._on_export),
-            ("Clear", self._on_clear),
-        ]
-
-        for text, command in target_buttons:
-            tk.Button(
-                self._target_controls_frame, text=text, command=command, width=8
-            ).pack(side=tk.LEFT, padx=2)
+        self._add_action_group(
+            self._target_controls_frame,
+            [("Run", self._on_run), ("Pause", self._on_pause), ("Zero", self._on_zero)],
+            width=10,
+        )
+        self._add_action_group(
+            self._target_controls_frame,
+            [("Export", self._on_export), ("Clear Selected", self._on_clear)],
+            width=13,
+            padx=(14, 0),
+        )
 
         self._step_controls_frame = tk.Frame(parent)
         self._step_controls_frame.pack(pady=(0, 15))
 
-        step_buttons = [
-            ("Step Up", lambda: self._on_step(direction=-1)),
-            ("Step Down", lambda: self._on_step(direction=1)),
-            ("Pause", self._on_pause),
-            ("Zero", self._on_zero),
-            ("Export", self._on_export),
-            ("Clear", self._on_clear),
-        ]
-
-        for text, command in step_buttons:
-            tk.Button(
-                self._step_controls_frame, text=text, command=command, width=9
-            ).pack(side=tk.LEFT, padx=2)
+        self._add_action_group(
+            self._step_controls_frame,
+            [
+                ("Step Up", lambda: self._on_step(direction=-1)),
+                ("Step Down", lambda: self._on_step(direction=1)),
+                ("Pause", self._on_pause),
+                ("Zero", self._on_zero),
+            ],
+            width=11,
+        )
+        self._add_action_group(
+            self._step_controls_frame,
+            [("Export", self._on_export), ("Clear Selected", self._on_clear)],
+            width=13,
+            padx=(14, 0),
+        )
 
         self._program_controls_frame = tk.Frame(parent)
         self._program_controls_frame.pack(pady=(0, 15))
 
-        program_buttons = [
-            ("Run", self._on_run),
-            ("Pause", self._on_pause),
-            ("Zero", self._on_zero),
-            ("Load Program", self._on_load_program),
-            ("Save Program", self._on_save_program),
-            ("Reset", self._on_reset_program),
-            ("Clear", self._on_clear),
-        ]
-
-        for text, command in program_buttons:
-            tk.Button(
-                self._program_controls_frame, text=text, command=command, width=12
-            ).pack(side=tk.LEFT, padx=2)
+        self._add_action_group(
+            self._program_controls_frame,
+            [
+                ("Run", self._on_run),
+                ("Pause", self._on_pause),
+                ("Zero", self._on_zero),
+                ("Reset", self._on_reset_program),
+            ],
+            width=10,
+        )
+        self._add_action_group(
+            self._program_controls_frame,
+            [("Load Program", self._on_load_program), ("Save Program", self._on_save_program)],
+            width=13,
+            padx=(14, 0),
+        )
+        self._add_action_group(
+            self._program_controls_frame,
+            [("Clear Selected", self._on_clear)],
+            width=13,
+            padx=(14, 0),
+        )
 
         self._update_mode_visibility()
+
+    def _add_action_group(self, parent: tk.Frame, buttons: list[tuple[str, Callable]],
+                          width: int, padx: tuple[int, int] = (0, 0)):
+        """Add a separated group of command buttons."""
+        group = tk.Frame(parent)
+        group.pack(side=tk.LEFT, padx=padx)
+        for text, command in buttons:
+            button = tk.Button(group, text=text, command=command, width=width)
+            button.pack(side=tk.LEFT, padx=2)
 
     def _build_header_row(self):
         """Build the header row with column labels."""
@@ -479,8 +518,10 @@ class MonkeyDriveApp:
         # Col 0: Motor ID Label + Checkbox
         id_frame = tk.Frame(self._motors_container)
         id_frame.grid(row=row_index, column=0, sticky='w', padx=(0, 5), pady=Config.ROW_PAD_Y)
+        widgets['row_frames'] = [id_frame]
 
-        tk.Label(id_frame, text=f"Motor {state.motor_id}:", width=8, anchor='w').pack(side=tk.LEFT)
+        widgets['motor_label'] = tk.Label(id_frame, text=f"Drive {state.motor_id}:", width=8, anchor='w')
+        widgets['motor_label'].pack(side=tk.LEFT)
 
         widgets['selected_var'] = tk.BooleanVar(value=state.is_selected)
         widgets['checkbox'] = tk.Checkbutton(
@@ -626,6 +667,7 @@ class MonkeyDriveApp:
             widgets['absolute_entry'], widgets['relative_entry'], widgets['notes_entry']
         ])
         widgets['all_widgets'] = visible_widgets
+        self._apply_row_selection_style(widgets, state.is_selected)
 
         return widgets
 
@@ -659,7 +701,17 @@ class MonkeyDriveApp:
             self._motor_widgets.append(widgets)
 
         self._style_widget_tree(self._motors_container)
+        for state, widgets in zip(self._motor_states, self._motor_widgets):
+            self._apply_row_selection_style(widgets, state.is_selected)
         self._fit_window_to_content()
+
+    def _visible_column_count(self) -> int:
+        """Return the number of visible columns in the active motor table."""
+        if self._is_step_mode():
+            return len(Config.STEP_COL_MIN_WIDTHS)
+        if self._is_program_mode():
+            return len(Config.PROGRAM_COL_MIN_WIDTHS)
+        return len(Config.COL_MIN_WIDTHS)
 
     # -------------------------------------------------------------------------
     # Helper Methods
@@ -673,8 +725,31 @@ class MonkeyDriveApp:
         """Return whether the GUI is currently in program mode."""
         return bool(self._mode_var and self._mode_var.get() == Config.MODE_PROGRAM)
 
+    def _select_mode(self, mode: str):
+        """Select a movement mode from the segmented button control."""
+        if self._mode_var:
+            self._mode_var.set(mode)
+        self._on_mode_change()
+
+    def _refresh_mode_buttons(self):
+        """Update segmented mode button relief to match the selected mode."""
+        current = self._mode_var.get() if self._mode_var else Config.MODE_TARGET
+        for mode, button in self._mode_buttons.items():
+            selected = mode == current
+            try:
+                button.configure(
+                    relief=tk.RAISED if selected else tk.GROOVE,
+                    background=Config.COLOR_ENTRY_BG if selected else Config.COLOR_MODE_TAB_BG,
+                    foreground=Config.COLOR_FG,
+                    borderwidth=2 if selected else 1,
+                    font=('TkDefaultFont', 13, 'bold') if selected else ('TkDefaultFont', 13),
+                )
+            except tk.TclError:
+                pass
+
     def _on_mode_change(self):
         """Handle switching between movement modes."""
+        self._refresh_mode_buttons()
         self._update_mode_visibility()
         self._rebuild_motor_rows()
         self._fit_window_to_content()
@@ -707,7 +782,7 @@ class MonkeyDriveApp:
 
     def _pack_above_motor_table(self, frame: tk.Frame, **pack_options):
         """Pack a control frame before the motor table, even after mode toggles."""
-        if self._motors_container:
+        if self._motors_container and frame.master == self._motors_container.master:
             frame.pack(before=self._motors_container, **pack_options)
         else:
             frame.pack(**pack_options)
@@ -756,6 +831,24 @@ class MonkeyDriveApp:
         state.target = round(instruction.target, 3)
         self._sync_trajectory_from_target(state)
         self._update_trajectory_summary_motor_state(state)
+
+    def _apply_row_selection_style(self, widgets: dict, selected: bool):
+        """Visually mark rows selected for group movement commands."""
+        bg = Config.COLOR_ROW_SELECTED_BG if selected else Config.COLOR_BG
+
+        for frame in widgets.get('row_frames', []):
+            try:
+                frame.configure(background=bg)
+            except tk.TclError:
+                pass
+
+        for key in ('motor_label', 'checkbox'):
+            widget = widgets.get(key)
+            if widget:
+                try:
+                    widget.configure(background=bg, activebackground=bg)
+                except tk.TclError:
+                    pass
 
     def _bind_numeric_stepper(self, entry: tk.Entry, variable: tk.StringVar,
                               increment: float, decimals: int,
@@ -1322,6 +1415,7 @@ class MonkeyDriveApp:
         widgets = self._get_widgets(motor_id)
         if state and widgets:
             state.is_selected = widgets['selected_var'].get()
+            self._apply_row_selection_style(widgets, state.is_selected)
 
     def _on_speed_change(self, motor_id: int):
         """Handle speed input change."""
@@ -2119,6 +2213,17 @@ class MonkeyDriveApp:
         selected = [s for s in self._motor_states if s.is_selected]
 
         if not selected:
+            self._safe_popup(messagebox.showinfo, "No Selection", "Select at least one motor.")
+            return
+
+        clears_instructions = any(state.instructions for state in selected)
+        clear_message = (
+            f"Clear {len(selected)} selected motor row(s)?\n\n"
+            "This will pause selected motors and reset speed, target, position, relative zero, and notes."
+        )
+        if clears_instructions:
+            clear_message += "\n\nProgram instructions for selected motors will also be deleted."
+        if not messagebox.askyesno("Clear Selected", clear_message, parent=self._root):
             return
 
         # Pause selected motors that are running
