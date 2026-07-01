@@ -30,13 +30,19 @@ class AnatomyViewer(tk.Toplevel):
         self,
         parent: tk.Tk,
         initial_path: str = "",
+        initial_orientation_actual: str = "",
+        initial_orientation_scanner: str = "",
         on_path_change: Optional[Callable[[str], None]] = None,
+        on_orientation_change: Optional[Callable[[str, str], None]] = None,
     ):
         """Initialize the anatomy viewer."""
         super().__init__(parent)
 
         self._on_path_change = on_path_change
+        self._on_orientation_change = on_orientation_change
         self._initial_path = initial_path
+        self._orientation_actual_key = initial_orientation_actual
+        self._orientation_scanner_key = initial_orientation_scanner
         self._original_volume: AnatomyVolume | None = None
         self._volume: AnatomyVolume | None = None
         self._image_refs: dict[int, tk.PhotoImage] = {}
@@ -178,6 +184,13 @@ class AnatomyViewer(tk.Toplevel):
         self._original_volume = volume
         self._volume = volume
         self._orientation_status = ""
+        if remember:
+            self._orientation_actual_key = ""
+            self._orientation_scanner_key = ""
+            if self._on_orientation_change:
+                self._on_orientation_change("", "")
+        else:
+            self._apply_saved_orientation_if_available()
         self._update_volume_labels()
         self._set_all_slices_to_middle()
         self._render_all_planes()
@@ -226,12 +239,16 @@ class AnatomyViewer(tk.Toplevel):
             messagebox.showerror("Orientation Correction Failed", str(exc), parent=self)
             return
 
+        self._orientation_actual_key = actual_key
+        self._orientation_scanner_key = scanner_key
         actual_label = AnatomyOrientation.label(actual_key)
         scanner_label = AnatomyOrientation.label(scanner_key)
         self._orientation_status = f"orientation corrected: actual {actual_label}, scanner {scanner_label}"
         self._update_volume_labels()
         self._set_all_slices_to_middle()
         self._render_all_planes()
+        if self._on_orientation_change:
+            self._on_orientation_change(actual_key, scanner_key)
 
     def _restore_original_orientation(self):
         if not self._original_volume:
@@ -239,9 +256,36 @@ class AnatomyViewer(tk.Toplevel):
 
         self._volume = self._original_volume
         self._orientation_status = ""
+        self._orientation_actual_key = ""
+        self._orientation_scanner_key = ""
         self._update_volume_labels()
         self._set_all_slices_to_middle()
         self._render_all_planes()
+        if self._on_orientation_change:
+            self._on_orientation_change("", "")
+
+    def _apply_saved_orientation_if_available(self):
+        if not self._original_volume:
+            return
+        if not (self._orientation_actual_key and self._orientation_scanner_key):
+            return
+
+        try:
+            self._volume = AnatomyOrientation.correct_volume(
+                self._original_volume,
+                self._orientation_actual_key,
+                self._orientation_scanner_key,
+            )
+        except Exception:
+            self._orientation_actual_key = ""
+            self._orientation_scanner_key = ""
+            self._volume = self._original_volume
+            self._orientation_status = ""
+            return
+
+        actual_label = AnatomyOrientation.label(self._orientation_actual_key)
+        scanner_label = AnatomyOrientation.label(self._orientation_scanner_key)
+        self._orientation_status = f"orientation corrected: actual {actual_label}, scanner {scanner_label}"
 
     def _set_all_slices_to_middle(self):
         if not self._volume:

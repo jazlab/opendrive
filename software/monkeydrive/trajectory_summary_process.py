@@ -37,6 +37,8 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--anatomy-path", required=True)
     parser.add_argument("--motor-states-json", required=True)
+    parser.add_argument("--orientation-actual", default="")
+    parser.add_argument("--orientation-scanner", default="")
     args = parser.parse_args()
 
     try:
@@ -77,7 +79,13 @@ def main() -> int:
             MotorState.from_dict(state)
             for state in json.loads(args.motor_states_json)
         ]
-        viewer = TrajectorySummaryViewer(root, motor_states, args.anatomy_path)
+        viewer = TrajectorySummaryViewer(
+            root,
+            motor_states,
+            args.anatomy_path,
+            args.orientation_actual,
+            args.orientation_scanner,
+        )
         viewer.protocol("WM_DELETE_WINDOW", close)
         root.bind_all("<End>", lambda _event: (_emit({"type": "pause_requested"}), "break")[1])
 
@@ -99,6 +107,11 @@ def main() -> int:
                     )
                 elif command_type == "motor_state":
                     viewer.update_motor_state(MotorState.from_dict(command.get("motor_state", {})))
+                elif command_type == "anatomy_orientation":
+                    viewer.update_anatomy_orientation(
+                        str(command.get("actual", "")),
+                        str(command.get("scanner", "")),
+                    )
                 elif command_type == "close":
                     close()
                     return

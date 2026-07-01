@@ -9,7 +9,13 @@ import tkinter as tk
 from tkinter import messagebox
 import numpy as np
 
-from .anatomy import AnatomyDependencyError, AnatomyLoader, AnatomySliceRenderer, AnatomyVolume
+from .anatomy import (
+    AnatomyDependencyError,
+    AnatomyLoader,
+    AnatomyOrientation,
+    AnatomySliceRenderer,
+    AnatomyVolume,
+)
 from .config import Config
 from .models import MotorState, TrajectoryState
 
@@ -25,6 +31,8 @@ class TrajectorySummaryViewer(tk.Toplevel):
         parent: tk.Tk,
         motor_states: Iterable[MotorState],
         anatomy_path: str,
+        orientation_actual: str = "",
+        orientation_scanner: str = "",
     ):
         super().__init__(parent)
 
@@ -33,6 +41,8 @@ class TrajectorySummaryViewer(tk.Toplevel):
             for state in motor_states
         }
         self._anatomy_path = anatomy_path
+        self._orientation_actual_key = orientation_actual
+        self._orientation_scanner_key = orientation_scanner
         self._volume: AnatomyVolume | None = None
         self._status_var = tk.StringVar(value="Loading anatomy")
         self._view_vars: dict[int, tk.IntVar] = {}
@@ -98,6 +108,7 @@ class TrajectorySummaryViewer(tk.Toplevel):
 
         try:
             self._volume = AnatomyLoader.load(self._anatomy_path)
+            self._apply_orientation_to_loaded_volume()
         except AnatomyDependencyError as exc:
             messagebox.showwarning("Missing MRI Dependencies", str(exc), parent=self)
             self._status_var.set("Could not load anatomy")
@@ -109,6 +120,23 @@ class TrajectorySummaryViewer(tk.Toplevel):
 
         self._status_var.set(self._volume.display_name)
         self._render_all()
+
+    def _apply_orientation_to_loaded_volume(self):
+        if not self._volume:
+            return
+        if not (self._orientation_actual_key and self._orientation_scanner_key):
+            return
+        self._volume = AnatomyOrientation.correct_volume(
+            self._volume,
+            self._orientation_actual_key,
+            self._orientation_scanner_key,
+        )
+
+    def update_anatomy_orientation(self, actual_key: str, scanner_key: str):
+        """Update orientation correction and reload/re-render anatomy."""
+        self._orientation_actual_key = actual_key
+        self._orientation_scanner_key = scanner_key
+        self._load_anatomy()
 
     def update_motor_position(self, motor_id: int, position: float):
         state = self._motor_states.get(int(motor_id))
@@ -162,13 +190,34 @@ class TrajectorySummaryViewer(tk.Toplevel):
 
     def _slice_geometry(self, motor_id: int, trajectory: TrajectoryState):
         transverse_x, transverse_y, probe_axis = self._trajectory_basis(trajectory)
-        origin = (trajectory.x, trajectory.y, 0.0)
+        origin = self._trajectory_origin(trajectory)
         extent_x, extent_y, extent_z = self._world_extents_mm()
 
         view_axis = self._view_vars.get(motor_id)
         if not view_axis or view_axis.get() == self.INLINE:
-            return origin, transverse_y, probe_axis, extent_y, extent_z
-        return origin, transverse_x, probe_axis, extent_x, extent_z
+            return self._oriented_slice_geometry(origin, transverse_y, probe_axis, extent_y, extent_z)
+        return self._oriented_slice_geometry(origin, transverse_x, probe_axis, extent_x, extent_z)
+
+    def _oriented_slice_geometry(self, center, horizontal, vertical, width_mm, height_mm):
+        matrix = self._orientation_world_matrix()
+        if matrix is None:
+            return center, horizontal, vertical, width_mm, height_mm
+
+        center = tuple(matrix @ np.asarray(center, dtype=float))
+        horizontal = tuple(matrix @ np.asarray(horizontal, dtype=float))
+        vertical = tuple(matrix @ np.asarray(vertical, dtype=float))
+        return center, horizontal, vertical, width_mm, height_mm
+
+    def _orientation_world_matrix(self):
+        if not (self._orientation_actual_key and self._orientation_scanner_key):
+            return None
+        return AnatomyOrientation.world_from_corrected_matrix(
+            self._orientation_actual_key,
+            self._orientation_scanner_key,
+        )
+
+    def _trajectory_origin(self, trajectory: TrajectoryState):
+        return (trajectory.x, trajectory.y, 0.0)
 
     def _trajectory_basis(self, trajectory: TrajectoryState):
         x_axis = np.asarray([1.0, 0.0, 0.0])
@@ -182,7 +231,7 @@ class TrajectorySummaryViewer(tk.Toplevel):
         transverse_x = r_tilt @ x_axis
         transverse_y = r_tilt @ y_axis
 
-        r_twist = AnatomySliceRenderer.rotation_matrix(tuple(probe_axis), -trajectory.twist_rotation)
+        r_twist = AnatomySliceRenderer.rotation_matrix(tuple(probe_axis), trajectory.twist_rotation)
         return r_twist @ transverse_x, r_twist @ transverse_y, probe_axis
 
     def _world_extents_mm(self):

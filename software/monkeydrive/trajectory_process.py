@@ -39,6 +39,8 @@ def main() -> int:
     parser.add_argument("--motor-position", type=float, required=True)
     parser.add_argument("--anatomy-path", required=True)
     parser.add_argument("--trajectory-json", required=True)
+    parser.add_argument("--orientation-actual", default="")
+    parser.add_argument("--orientation-scanner", default="")
     args = parser.parse_args()
 
     try:
@@ -89,6 +91,8 @@ def main() -> int:
             trajectory,
             args.motor_position,
             args.anatomy_path,
+            args.orientation_actual,
+            args.orientation_scanner,
             on_save,
         )
         viewer.protocol("WM_DELETE_WINDOW", close)
@@ -109,6 +113,11 @@ def main() -> int:
                     viewer.update_motor_position(float(command.get("position", 0.0)))
                 elif command_type == "target_offset":
                     viewer.update_target_offset(float(command.get("target_offset", 0.0)))
+                elif command_type == "anatomy_orientation":
+                    viewer.update_anatomy_orientation(
+                        str(command.get("actual", "")),
+                        str(command.get("scanner", "")),
+                    )
                 elif command_type == "close":
                     close()
                     return

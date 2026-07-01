@@ -35,6 +35,8 @@ def _preload_mri_dependencies():
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--initial-path", default="")
+    parser.add_argument("--orientation-actual", default="")
+    parser.add_argument("--orientation-scanner", default="")
     args = parser.parse_args()
 
     try:
@@ -62,6 +64,13 @@ def main() -> int:
     def on_path_change(path: str):
         _emit({"type": "path_change", "path": path})
 
+    def on_orientation_change(actual_key: str, scanner_key: str):
+        _emit({
+            "type": "orientation_change",
+            "actual": actual_key,
+            "scanner": scanner_key,
+        })
+
     def close():
         nonlocal closed
         if closed:
@@ -74,7 +83,14 @@ def main() -> int:
             pass
 
     try:
-        viewer = AnatomyViewer(root, initial_path=args.initial_path, on_path_change=on_path_change)
+        viewer = AnatomyViewer(
+            root,
+            initial_path=args.initial_path,
+            initial_orientation_actual=args.orientation_actual,
+            initial_orientation_scanner=args.orientation_scanner,
+            on_path_change=on_path_change,
+            on_orientation_change=on_orientation_change,
+        )
         viewer.protocol("WM_DELETE_WINDOW", close)
         root.bind_all("<End>", lambda _event: (_emit({"type": "pause_requested"}), "break")[1])
 

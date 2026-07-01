@@ -137,14 +137,26 @@ class AnatomyOrientation:
         return cls._SPECS[key].label
 
     @classmethod
-    def correct_volume(cls, volume: AnatomyVolume, actual_key: str, scanner_key: str) -> AnatomyVolume:
-        """Return a display-corrected copy of a volume."""
+    def correction_matrix(cls, actual_key: str, scanner_key: str):
+        """Return the signed axis transform used for an orientation correction."""
         np = _import_numpy()
         actual = np.asarray(cls._SPECS[actual_key].matrix, dtype=int)
         scanner = np.asarray(cls._SPECS[scanner_key].matrix, dtype=int)
-        transform = actual @ scanner.T
+        return actual @ scanner.T
 
-        corrected_data, axis_order, _flipped_axes = cls._apply_signed_permutation(
+    @classmethod
+    def world_from_corrected_matrix(cls, actual_key: str, scanner_key: str):
+        """Return a matrix mapping corrected/anatomical world vectors to scanner-world vectors."""
+        np = _import_numpy()
+        return np.asarray(cls.correction_matrix(actual_key, scanner_key), dtype=float).T
+
+    @classmethod
+    def correct_volume(cls, volume: AnatomyVolume, actual_key: str, scanner_key: str) -> AnatomyVolume:
+        """Return a display-corrected copy of a volume."""
+        np = _import_numpy()
+        transform = cls.correction_matrix(actual_key, scanner_key)
+
+        corrected_data, axis_order, flipped_axes = cls._apply_signed_permutation(
             volume.data, transform
         )
 
@@ -152,11 +164,18 @@ class AnatomyOrientation:
         if volume.voxel_sizes and len(volume.voxel_sizes) >= 3:
             voxel_sizes = tuple(volume.voxel_sizes[axis] for axis in axis_order)
 
+        affine = None
+        if volume.affine is not None:
+            old_from_new = cls._old_from_new_voxel_transform(
+                volume.data.shape, axis_order, flipped_axes
+            )
+            affine = np.asarray(volume.affine, dtype=float) @ old_from_new
+
         return AnatomyVolume(
             data=corrected_data,
             source_path=volume.source_path,
             source_type=volume.source_type,
-            affine=None,
+            affine=affine,
             voxel_sizes=voxel_sizes,
             orientation_codes=volume.orientation_codes,
         )
@@ -185,6 +204,24 @@ class AnatomyOrientation:
             transformed = np.flip(transformed, axis=axis)
 
         return transformed.copy(), tuple(axis_order), tuple(flipped_axes)
+
+    @staticmethod
+    def _old_from_new_voxel_transform(old_shape, axis_order, flipped_axes):
+        """Return a homogeneous matrix mapping corrected voxel coords to original voxel coords."""
+        np = _import_numpy()
+        matrix = np.eye(4, dtype=float)
+        matrix[:3, :3] = 0.0
+        matrix[:3, 3] = 0.0
+
+        flipped_axes = set(flipped_axes)
+        for new_axis, old_axis in enumerate(axis_order):
+            if new_axis in flipped_axes:
+                matrix[old_axis, new_axis] = -1.0
+                matrix[old_axis, 3] = float(old_shape[old_axis] - 1)
+            else:
+                matrix[old_axis, new_axis] = 1.0
+
+        return matrix
 
 
 class AnatomyLoader:

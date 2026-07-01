@@ -61,6 +61,8 @@ class MonkeyDriveApp:
         self._saved_step_speed: float = Config.DEFAULT_STEP_SPEED
         self._saved_step_size: float = Config.DEFAULT_STEP_SIZE
         self._saved_anatomy_path: str = ""
+        self._anatomy_orientation_actual: str = ""
+        self._anatomy_orientation_scanner: str = ""
         self._recent_programs: list[str] = []
         self._min_speed: float = Config.MIN_SPEED
         self._max_speed: float = Config.MAX_SPEED
@@ -1293,7 +1295,11 @@ class MonkeyDriveApp:
 
         self._anatomy_window = JsonViewerProcess(
             "monkeydrive.anatomy_process",
-            ["--initial-path", self._saved_anatomy_path],
+            [
+                "--initial-path", self._saved_anatomy_path,
+                "--orientation-actual", self._anatomy_orientation_actual,
+                "--orientation-scanner", self._anatomy_orientation_scanner,
+            ],
             cwd=Path(__file__).parent,
         )
 
@@ -1305,9 +1311,38 @@ class MonkeyDriveApp:
 
     def _on_anatomy_path_change(self, path: str):
         """Save the most recently loaded anatomy path."""
+        if path != self._saved_anatomy_path:
+            self._anatomy_orientation_actual = ""
+            self._anatomy_orientation_scanner = ""
+            self._send_anatomy_orientation_to_viewers()
         self._saved_anatomy_path = path
         self._refresh_trajectory_buttons()
         self._save_state()
+
+    def _on_anatomy_orientation_change(self, actual_key: str, scanner_key: str):
+        """Persist anatomy orientation correction and notify open trajectory viewers."""
+        self._anatomy_orientation_actual = actual_key
+        self._anatomy_orientation_scanner = scanner_key
+        self._send_anatomy_orientation_to_viewers()
+        self._save_state()
+
+    def _send_anatomy_orientation_to_viewers(self):
+        """Notify open trajectory windows that anatomy orientation changed."""
+        message = {
+            "type": "anatomy_orientation",
+            "actual": self._anatomy_orientation_actual,
+            "scanner": self._anatomy_orientation_scanner,
+        }
+        for motor_id, window in list(self._trajectory_windows.items()):
+            if window.is_running():
+                window.send(message)
+            else:
+                self._trajectory_windows.pop(motor_id, None)
+        if self._trajectory_summary_window:
+            if self._trajectory_summary_window.is_running():
+                self._trajectory_summary_window.send(message)
+            else:
+                self._trajectory_summary_window = None
 
     def _has_loaded_anatomy(self) -> bool:
         """Return whether an anatomy file/folder is available for trajectory planning."""
@@ -1335,6 +1370,11 @@ class MonkeyDriveApp:
                 event_type = event.get("type")
                 if event_type == "path_change":
                     self._on_anatomy_path_change(str(event.get("path", "")))
+                elif event_type == "orientation_change":
+                    self._on_anatomy_orientation_change(
+                        str(event.get("actual", "")),
+                        str(event.get("scanner", "")),
+                    )
                 elif event_type == "pause_requested":
                     self._on_pause()
                 elif event_type in ("closed", "exited"):
@@ -1626,6 +1666,8 @@ class MonkeyDriveApp:
                 "--motor-position", f"{state.absolute:g}",
                 "--anatomy-path", self._saved_anatomy_path,
                 "--trajectory-json", json.dumps(state.trajectory.to_dict()),
+                "--orientation-actual", self._anatomy_orientation_actual,
+                "--orientation-scanner", self._anatomy_orientation_scanner,
             ],
             cwd=Path(__file__).parent,
         )
@@ -1650,6 +1692,8 @@ class MonkeyDriveApp:
             [
                 "--anatomy-path", self._saved_anatomy_path,
                 "--motor-states-json", json.dumps([state.to_dict() for state in self._motor_states]),
+                "--orientation-actual", self._anatomy_orientation_actual,
+                "--orientation-scanner", self._anatomy_orientation_scanner,
             ],
             cwd=Path(__file__).parent,
         )
@@ -2393,6 +2437,8 @@ class MonkeyDriveApp:
                 'max_speed': self._max_speed,
                 'backlash': round(self._backlash, 3),
                 'anatomy_path': self._saved_anatomy_path,
+                'anatomy_orientation_actual': self._anatomy_orientation_actual,
+                'anatomy_orientation_scanner': self._anatomy_orientation_scanner,
                 'recent_programs': self._recent_programs[:10],
             }
             with open(self._get_data_path(), 'w', encoding='utf-8') as f:
@@ -2431,6 +2477,8 @@ class MonkeyDriveApp:
                 self._max_speed = float(data.get('max_speed', Config.MAX_SPEED))
                 self._backlash = round(float(data.get('backlash', Config.DEFAULT_BACKLASH_MM)), 3)
                 self._saved_anatomy_path = str(data.get('anatomy_path', ""))
+                self._anatomy_orientation_actual = str(data.get('anatomy_orientation_actual', ""))
+                self._anatomy_orientation_scanner = str(data.get('anatomy_orientation_scanner', ""))
                 recent_programs = data.get('recent_programs', [])
                 if isinstance(recent_programs, list):
                     self._recent_programs = [
@@ -2455,6 +2503,8 @@ class MonkeyDriveApp:
             self._max_speed = Config.MAX_SPEED
             self._backlash = Config.DEFAULT_BACKLASH_MM
             self._saved_anatomy_path = ""
+            self._anatomy_orientation_actual = ""
+            self._anatomy_orientation_scanner = ""
             self._recent_programs = []
 
     def _schedule_auto_save(self):
