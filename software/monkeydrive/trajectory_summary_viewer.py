@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import math
+import queue
+import threading
 from typing import Iterable
 
 import tkinter as tk
@@ -18,6 +20,8 @@ from .anatomy import (
 )
 from .config import Config
 from .models import MotorState, TrajectoryState
+from .probe_map_colors import color_from_lut, load_shank_lut
+from .spikeglx_client import SpikeGLXConfig, SpikeGLXLiveClient, SpikeGLXUnavailable
 
 
 class TrajectorySummaryViewer(tk.Toplevel):
@@ -49,6 +53,15 @@ class TrajectorySummaryViewer(tk.Toplevel):
         self._canvases: dict[int, tk.Canvas] = {}
         self._image_items: dict[int, int] = {}
         self._image_refs: dict[int, tk.PhotoImage] = {}
+        self._image_heights_mm: dict[int, float] = {}
+        self._probe_map_events: queue.Queue = queue.Queue()
+        self._probe_map_stop_events: dict[int, threading.Event] = {}
+        self._probe_map_generations: dict[int, int] = {}
+        self._probe_map_intervals_ms: dict[int, int] = {}
+        self._probe_map_values_mv: dict[int, list[float]] = {}
+        self._probe_map_depths_mm: dict[int, list[float]] = {}
+        self._probe_map_lut = load_shank_lut()
+        self._probe_map_channel_pitch_mm = 0.01
 
         self.title("Trajectory Summary")
         self.geometry("1180x760")
@@ -61,7 +74,16 @@ class TrajectorySummaryViewer(tk.Toplevel):
 
         self._build_ui()
         self._style_widget_tree()
+        self.after(100, self._poll_probe_map_events)
+        self._sync_probe_map_workers()
         self.after(100, self._load_anatomy)
+
+    def destroy(self):
+        self._stop_all_probe_map_workers()
+        try:
+            super().destroy()
+        except tk.TclError:
+            pass
 
     def _build_ui(self):
         container = tk.Frame(self, padx=12, pady=12)
@@ -147,7 +169,107 @@ class TrajectorySummaryViewer(tk.Toplevel):
 
     def update_motor_state(self, state: MotorState):
         self._motor_states[state.motor_id] = MotorState.from_dict(state.to_dict())
+        self._sync_probe_map_workers()
         self._render_motor(state.motor_id)
+
+    def _sync_probe_map_workers(self):
+        wanted: dict[int, int] = {}
+        for state in self._motor_states.values():
+            trajectory = state.trajectory
+            if not trajectory.probe_map_enabled:
+                continue
+            probe = max(0, int(trajectory.probe_map_probe))
+            update_ms = max(100, int(trajectory.probe_map_update_ms))
+            wanted[probe] = min(wanted.get(probe, update_ms), update_ms)
+
+        for probe in list(self._probe_map_stop_events):
+            if probe not in wanted:
+                self._stop_probe_map_worker(probe)
+
+        for probe, update_ms in wanted.items():
+            if self._probe_map_intervals_ms.get(probe) != update_ms:
+                self._start_probe_map_worker(probe, update_ms)
+
+    def _start_probe_map_worker(self, probe: int, update_ms: int):
+        self._stop_probe_map_worker(probe)
+        generation = self._probe_map_generations.get(probe, 0) + 1
+        self._probe_map_generations[probe] = generation
+        self._probe_map_intervals_ms[probe] = update_ms
+        stop_event = threading.Event()
+        self._probe_map_stop_events[probe] = stop_event
+        thread = threading.Thread(
+            target=self._probe_map_worker_loop,
+            args=(probe, generation, stop_event, max(0.1, update_ms / 1000.0)),
+            daemon=True,
+        )
+        thread.start()
+
+    def _stop_probe_map_worker(self, probe: int):
+        self._probe_map_generations[probe] = self._probe_map_generations.get(probe, 0) + 1
+        stop_event = self._probe_map_stop_events.pop(probe, None)
+        if stop_event is not None:
+            stop_event.set()
+        self._probe_map_intervals_ms.pop(probe, None)
+        self._probe_map_values_mv.pop(probe, None)
+        self._probe_map_depths_mm.pop(probe, None)
+
+    def _stop_all_probe_map_workers(self):
+        for probe in list(self._probe_map_stop_events):
+            self._stop_probe_map_worker(probe)
+
+    def _probe_map_worker_loop(self, probe: int, generation: int, stop_event: threading.Event, update_interval: float):
+        client = None
+        try:
+            client = SpikeGLXLiveClient(
+                SpikeGLXConfig(
+                    ip=probe,
+                    samples_per_fetch=300,
+                    prefer_filtered=True,
+                )
+            )
+            client.connect()
+            while not stop_event.wait(update_interval):
+                self._probe_map_events.put(("snapshot", probe, generation, client.fetch_snapshot()))
+        except SpikeGLXUnavailable as exc:
+            self._probe_map_events.put(("error", probe, generation, str(exc)))
+        except Exception as exc:
+            self._probe_map_events.put(("error", probe, generation, f"Probe map failed: {exc}"))
+        finally:
+            if client is not None:
+                client.close()
+
+    def _poll_probe_map_events(self):
+        latest_by_probe: dict[int, tuple] = {}
+        while True:
+            try:
+                event = self._probe_map_events.get_nowait()
+            except queue.Empty:
+                break
+            kind, probe, generation = event[:3]
+            if generation != self._probe_map_generations.get(probe):
+                continue
+            if kind == "snapshot":
+                latest_by_probe[probe] = event
+            elif kind == "error":
+                self._status_var.set(str(event[3]))
+                self._probe_map_values_mv.pop(probe, None)
+                self._probe_map_depths_mm.pop(probe, None)
+                self._render_probe_map_motors(probe)
+
+        for probe, event in latest_by_probe.items():
+            snapshot = event[3]
+            self._probe_map_values_mv[probe] = list(snapshot.peak_to_peak_mv)
+            self._probe_map_depths_mm[probe] = list(getattr(snapshot, "channel_depths_mm", []))
+            self._render_probe_map_motors(probe)
+
+        if self.winfo_exists():
+            self.after(100, self._poll_probe_map_events)
+
+    def _render_probe_map_motors(self, probe: int):
+        for motor_id, state in self._motor_states.items():
+            trajectory = state.trajectory
+            if trajectory.probe_map_enabled and int(trajectory.probe_map_probe) == probe:
+                self._redraw_motor_overlay(motor_id)
 
     def _render_all(self):
         for motor_id in list(self._canvases):
@@ -177,6 +299,7 @@ class TrajectorySummaryViewer(tk.Toplevel):
             image_ref = tk.PhotoImage(data=image_data, format="PPM")
             self._draw_motor(canvas, motor_id, state, image_ref, height_mm)
             self._image_refs[motor_id] = image_ref
+            self._image_heights_mm[motor_id] = height_mm
         except tk.TclError:
             return
         except Exception as exc:
@@ -187,6 +310,19 @@ class TrajectorySummaryViewer(tk.Toplevel):
                 text=f"Could not render:\n{exc}",
                 fill="#ffffff",
             )
+
+    def _redraw_motor_overlay(self, motor_id: int):
+        canvas = self._canvases.get(motor_id)
+        state = self._motor_states.get(motor_id)
+        image_ref = self._image_refs.get(motor_id)
+        height_mm = self._image_heights_mm.get(motor_id)
+        if not canvas or not state or not image_ref or height_mm is None:
+            return
+        try:
+            if canvas.winfo_exists():
+                self._draw_motor(canvas, motor_id, state, image_ref, height_mm)
+        except tk.TclError:
+            return
 
     def _slice_geometry(self, motor_id: int, trajectory: TrajectoryState):
         transverse_x, transverse_y, probe_axis = self._trajectory_basis(trajectory)
@@ -282,6 +418,77 @@ class TrajectorySummaryViewer(tk.Toplevel):
                 image_height, height_mm, self._active_depth_offset(state)
             )
             canvas.create_line(center_x, top, center_x, bottom_y, fill="#1f6fff", width=4, tags=("summary_overlay",))
+            self._draw_probe_map_overlay(canvas, state, center_x, top, bottom_y, image_height, height_mm)
+
+    def _draw_probe_map_overlay(
+        self,
+        canvas: tk.Canvas,
+        state: MotorState,
+        center_x: float,
+        top: float,
+        bottom_y: float,
+        image_height: int,
+        height_mm: float,
+    ):
+        trajectory = state.trajectory
+        if not trajectory.probe_map_enabled:
+            return
+        if bottom_y <= top:
+            return
+
+        probe = max(0, int(trajectory.probe_map_probe))
+        values = self._probe_map_values_mv.get(probe, [])
+        if not values:
+            return
+
+        map_min = float(trajectory.probe_map_min_mv)
+        map_max = float(trajectory.probe_map_max_mv)
+        if map_max <= map_min:
+            map_max = map_min + 1.0
+
+        mm_to_pixels = image_height / max(float(height_mm), 1.0)
+        segment_height = self._probe_map_channel_pitch_mm * mm_to_pixels
+        if segment_height <= 0:
+            return
+
+        depths = self._probe_map_depths_mm.get(probe, [])
+        half_width = 5
+        if depths:
+            channel_height = max(1.0, segment_height)
+            for channel, value in enumerate(values[:len(depths)]):
+                y_center = bottom_y - (depths[channel] * mm_to_pixels)
+                if y_center < top or y_center > bottom_y:
+                    continue
+                y0 = max(top, y_center - channel_height / 2.0)
+                y1 = min(bottom_y, y_center + channel_height / 2.0)
+                canvas.create_rectangle(
+                    center_x - half_width,
+                    y0,
+                    center_x + half_width,
+                    y1,
+                    fill=color_from_lut(self._probe_map_lut, value, map_min, map_max),
+                    outline="",
+                    tags=("summary_overlay",),
+                )
+            return
+
+        map_height = min(bottom_y - top, len(values) * segment_height)
+        row_count = max(1, int(round(map_height)))
+        for row_from_bottom in range(row_count):
+            channel = int(row_from_bottom / segment_height)
+            if channel >= len(values):
+                break
+            y1 = bottom_y - row_from_bottom
+            y0 = max(top, bottom_y - row_from_bottom - 1)
+            canvas.create_rectangle(
+                center_x - half_width,
+                y0,
+                center_x + half_width,
+                y1,
+                fill=color_from_lut(self._probe_map_lut, values[channel], map_min, map_max),
+                outline="",
+                tags=("summary_overlay",),
+            )
 
     def _active_depth_offset(self, state: MotorState) -> float:
         trajectory = state.trajectory

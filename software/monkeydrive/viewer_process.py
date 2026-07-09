@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import queue
 import subprocess
 import sys
@@ -19,9 +20,16 @@ class JsonViewerProcess:
 
     def __init__(self, module: str, args: list[str], cwd: Path):
         command = [sys.executable, "-m", module, *args]
+        env = os.environ.copy()
+        pythonpath = str(cwd)
+        existing_path = env.get("PYTHONPATH", "")
+        if existing_path:
+            pythonpath = pythonpath + os.pathsep + existing_path
+        env["PYTHONPATH"] = pythonpath
         self._process = subprocess.Popen(
             command,
             cwd=str(cwd),
+            env=env,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=None,

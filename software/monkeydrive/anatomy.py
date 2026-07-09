@@ -473,7 +473,7 @@ class AnatomySliceRenderer:
 
         width_mm = max(float(width_mm), 1.0)
         height_mm = max(float(height_mm), 1.0)
-        zoom = max(0.25, min(float(zoom), 4.0))
+        zoom = max(0.25, min(float(zoom), 10.0))
         largest = max(width_mm, height_mm)
         width_px = max(1, int((width_mm / largest) * max_size * zoom))
         height_px = max(1, int((height_mm / largest) * max_size * zoom))
@@ -506,7 +506,7 @@ class AnatomySliceRenderer:
         np = _import_numpy()
         height, width = image.shape
         largest = max(height, width)
-        zoom = max(0.25, min(float(zoom), 4.0))
+        zoom = max(0.25, min(float(zoom), 10.0))
         base_scale = min(1.0, max_size / largest)
         scale = base_scale * zoom
         if abs(scale - 1.0) < 0.01:

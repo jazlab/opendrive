@@ -69,6 +69,11 @@ def main() -> int:
             return
         closed = True
         _emit({"type": "closed"})
+        if viewer is not None:
+            try:
+                viewer.destroy()
+            except tk.TclError:
+                pass
         try:
             root.destroy()
         except tk.TclError:

@@ -41,6 +41,11 @@ class TrajectoryState:
     probe_motor_position: float = 0.0
     target_location_set: bool = False
     target_offset: float = 0.0
+    probe_map_enabled: bool = False
+    probe_map_probe: int = 0
+    probe_map_min_mv: float = 0.0
+    probe_map_max_mv: float = 2.5
+    probe_map_update_ms: int = 500
 
     def to_dict(self) -> dict:
         """Convert trajectory to a dictionary."""
@@ -62,6 +67,11 @@ class TrajectoryState:
             probe_motor_position=float(data.get('probe_motor_position', 0.0)),
             target_location_set=bool(data.get('target_location_set', False)),
             target_offset=float(data.get('target_offset', 0.0)),
+            probe_map_enabled=bool(data.get('probe_map_enabled', False)),
+            probe_map_probe=int(data.get('probe_map_probe', 0)),
+            probe_map_min_mv=float(data.get('probe_map_min_mv', 0.0)),
+            probe_map_max_mv=float(data.get('probe_map_max_mv', 2.5)),
+            probe_map_update_ms=int(data.get('probe_map_update_ms', 500)),
         )
 
 @dataclass
