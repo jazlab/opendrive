@@ -117,7 +117,7 @@ def _spikeglx_command_lock():
 
 
 class SpikeGLXLiveClient:
-    """Small wrapper around the SpikeGLX C API used by the drift viewer."""
+    """Small wrapper around the SpikeGLX C API used by probe-map viewers."""
 
     def __init__(self, config: SpikeGLXConfig):
         self.config = config

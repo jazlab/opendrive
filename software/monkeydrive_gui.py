@@ -57,7 +57,6 @@ class MonkeyDriveApp:
         self._trajectory_windows: dict = {}
         self._trajectory_summary_window: Optional[JsonViewerProcess] = None
         self._probe_summary_window: Optional[JsonViewerProcess] = None
-        self._drift_window: Optional[JsonViewerProcess] = None
         self._saved_mode: str = Config.MODE_TARGET
         self._saved_port: str = ""
         self._saved_step_speed: float = Config.DEFAULT_STEP_SPEED
@@ -99,7 +98,6 @@ class MonkeyDriveApp:
         self._settings_window: Optional[SettingsWindow] = None
         self._anatomy_window: Optional[JsonViewerProcess] = None
         self._trajectory_summary_btn: Optional[tk.Button] = None
-        self._drift_btn: Optional[tk.Button] = None
         self._motors_container: Optional[tk.Frame] = None
 
         # Load saved state
@@ -316,12 +314,6 @@ class MonkeyDriveApp:
             parent, text="Anatomy", command=self._on_anatomy,
             width=utility_button_width
         ).pack(fill=tk.X, pady=(8, 0))
-
-        self._drift_btn = tk.Button(
-            parent, text="Neural Drift", command=self._on_drift,
-            width=utility_button_width
-        )
-        self._drift_btn.pack(fill=tk.X, pady=(8, 0))
 
         tk.Button(
             parent, text="Probe Summary", command=self._on_probe_summary,
@@ -1323,18 +1315,6 @@ class MonkeyDriveApp:
             self._anatomy_window.close()
         self._anatomy_window = None
 
-    def _on_drift(self):
-        """Open the neural drift diagnostics window."""
-        if self._drift_window and self._drift_window.is_running():
-            self._drift_window.send_focus()
-            return
-
-        self._drift_window = JsonViewerProcess(
-            "monkeydrive.drift_process",
-            [],
-            cwd=Path(__file__).parent,
-        )
-
     def _on_anatomy_path_change(self, path: str):
         """Save the most recently loaded anatomy path."""
         if path != self._saved_anatomy_path:
@@ -1433,16 +1413,6 @@ class MonkeyDriveApp:
                     self._trajectory_summary_window = None
                 elif event_type == "error":
                     logger.error("Trajectory summary error: %s", event.get("message"))
-
-        if self._drift_window:
-            for event in self._drift_window.poll_events():
-                event_type = event.get("type")
-                if event_type == "pause_requested":
-                    self._on_pause()
-                elif event_type in ("closed", "exited"):
-                    self._drift_window = None
-                elif event_type == "error":
-                    logger.error("Neural drift viewer error: %s", event.get("message"))
 
         if self._probe_summary_window:
             for event in self._probe_summary_window.poll_events():
@@ -2594,9 +2564,6 @@ class MonkeyDriveApp:
             self._trajectory_summary_window.terminate()
         if self._probe_summary_window:
             self._probe_summary_window.terminate()
-
-        if self._drift_window:
-            self._drift_window.terminate()
 
         for window in self._trajectory_windows.values():
             window.terminate()
