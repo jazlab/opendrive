@@ -12,6 +12,8 @@ import threading
 from pathlib import Path
 from typing import Optional
 
+from .viewer_tasks import ViewerCommands
+
 logger = logging.getLogger(__name__)
 
 
@@ -37,9 +39,7 @@ class JsonViewerProcess:
             bufsize=1,
         )
         self._events: queue.Queue = queue.Queue()
-        self._commands: queue.Queue = queue.Queue()
-        self._latest_position: Optional[float] = None
-        self._position_lock = threading.Lock()
+        self._commands = ViewerCommands()
         self._stopped = False
 
         self._reader = threading.Thread(target=self._reader_loop, daemon=True)
@@ -77,10 +77,7 @@ class JsonViewerProcess:
 
     def send_motor_position(self, position: float):
         """Send only the latest motor position to the subprocess."""
-        if not self.is_running():
-            return
-        with self._position_lock:
-            self._latest_position = float(position)
+        self.send({"type": "motor_position", "position": float(position)})
 
     def send_target_offset(self, target_offset: float):
         """Send an updated trajectory target offset to the subprocess."""
@@ -124,13 +121,7 @@ class JsonViewerProcess:
             try:
                 message = self._commands.get(timeout=0.05)
             except queue.Empty:
-                with self._position_lock:
-                    if self._latest_position is not None:
-                        message = {
-                            "type": "motor_position",
-                            "position": self._latest_position,
-                        }
-                        self._latest_position = None
+                continue
 
             if message is None:
                 continue

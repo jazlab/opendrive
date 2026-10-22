@@ -11,9 +11,11 @@ from __future__ import annotations
 
 import argparse
 import math
+import queue
 import statistics
 import threading
 import time
+from unittest.mock import patch
 
 from monkeydrive_gui import MonkeyDriveApp
 
@@ -31,12 +33,17 @@ class GuiStressTest:
 
     def __init__(self, args: argparse.Namespace):
         self.args = args
-        self.app = MonkeyDriveApp()
+        # Suppress the constructor's initial save as well as subsequent saves.
+        with patch.object(MonkeyDriveApp, '_save_state', lambda _self: None):
+            self.app = MonkeyDriveApp()
         self.root = self.app.root
         self.stop_event = threading.Event()
         self.tick_gaps_ms: list[float] = []
         self.urgent_latencies_ms: list[float] = []
         self.position_updates = 0
+        self._positions = {}
+        self._positions_lock = threading.Lock()
+        self._urgent_events = queue.Queue(maxsize=1)
         self._last_tick = time.perf_counter()
 
         # Do not let simulated positions overwrite the user's real saved state.
@@ -47,8 +54,10 @@ class GuiStressTest:
         self.root.after(250, self._open_viewers)
         self.root.after(self.args.tick_ms, self._tick)
         self.root.after(int(self.args.duration * 1000), self._finish)
+        self.root.after(5, self._drain_simulated_events)
 
-        threading.Thread(target=self._position_update_loop, daemon=True).start()
+        motor_ids = [state.motor_id for state in self.app.motor_states]
+        threading.Thread(target=self._position_update_loop, args=(motor_ids,), daemon=True).start()
         threading.Thread(target=self._urgent_callback_loop, daemon=True).start()
 
         print(
@@ -82,9 +91,8 @@ class GuiStressTest:
         if not self.stop_event.is_set():
             self.root.after(self.args.tick_ms, self._tick)
 
-    def _position_update_loop(self):
+    def _position_update_loop(self, motor_ids):
         period = 1.0 / max(self.args.update_hz, 0.1)
-        motor_ids = [state.motor_id for state in self.app.motor_states]
         start = time.perf_counter()
 
         while not self.stop_event.is_set():
@@ -92,7 +100,8 @@ class GuiStressTest:
             for motor_id in motor_ids:
                 phase = elapsed * self.args.motion_hz + motor_id
                 position = 25.0 + 20.0 * math.sin(phase)
-                self.app._on_position_update(motor_id, position)
+                with self._positions_lock:
+                    self._positions[motor_id] = position
                 self.position_updates += 1
             time.sleep(period)
 
@@ -101,10 +110,23 @@ class GuiStressTest:
         while not self.stop_event.is_set():
             scheduled = time.perf_counter()
             try:
-                self.root.after(0, lambda s=scheduled: self._record_urgent_latency(s))
-            except RuntimeError:
-                return
+                self._urgent_events.put_nowait(scheduled)
+            except queue.Full:
+                pass
             time.sleep(period)
+
+    def _drain_simulated_events(self):
+        with self._positions_lock:
+            positions = list(self._positions.items())
+            self._positions.clear()
+        for motor_id, position in positions:
+            self.app._on_position_update(motor_id, position)
+        try:
+            self._record_urgent_latency(self._urgent_events.get_nowait())
+        except queue.Empty:
+            pass
+        if not self.stop_event.is_set():
+            self.root.after(5, self._drain_simulated_events)
 
     def _record_urgent_latency(self, scheduled: float):
         self.urgent_latencies_ms.append((time.perf_counter() - scheduled) * 1000.0)

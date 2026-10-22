@@ -11,6 +11,8 @@ import traceback
 
 import tkinter as tk
 
+from .viewer_tasks import ViewerCommands
+
 from .anatomy import AnatomyDependencyError, _import_numpy
 from .models import TrajectoryState
 from .trajectory_viewer import TrajectoryViewer
@@ -49,7 +51,7 @@ def main() -> int:
         _emit({"type": "error", "message": str(exc), "motor_id": args.motor_id})
         return 1
 
-    commands: queue.Queue = queue.Queue()
+    commands = ViewerCommands()
 
     def reader():
         for line in sys.stdin:
@@ -99,7 +101,7 @@ def main() -> int:
         root.bind_all("<End>", lambda _event: (_emit({"type": "pause_requested"}), "break")[1])
 
         def poll_commands():
-            while True:
+            for _ in range(16):
                 try:
                     command = commands.get_nowait()
                 except queue.Empty:
@@ -122,9 +124,9 @@ def main() -> int:
                     close()
                     return
 
-            root.after(50, poll_commands)
+            root.after(20, poll_commands)
 
-        root.after(50, poll_commands)
+        root.after(20, poll_commands)
         root.mainloop()
         return 0
     except Exception as exc:

@@ -6,6 +6,12 @@ class Config:
     # Serial communication
     BAUD_RATE: int = 115200
     SERIAL_TIMEOUT: float = 0.1
+    SERIAL_WRITE_TIMEOUT: float = 0.2
+    SERIAL_COMMAND_QUEUE_LIMIT: int = 64
+    SERIAL_RECEIVE_LIMIT: int = 4096
+    GUI_POLL_INTERVAL_MS: int = 20
+    GUI_WATCHDOG_TIMEOUT: float = 1.0
+    SERIAL_SHUTDOWN_TIMEOUT: float = 1.0
 
     # Motor limits
     MAX_MOTORS: int = 6
@@ -21,7 +27,7 @@ class Config:
     HEARTBEAT_INTERVAL: float = 0.5
     HEARTBEAT_TIMEOUT: float = 1.0
     POSITION_UPDATE_INTERVAL: float = 0.2
-    TRAJECTORY_LIVE_UPDATE_INTERVAL_MS: int = 750
+    TRAJECTORY_LIVE_UPDATE_INTERVAL_MS: int = 100
     AUTO_SAVE_INTERVAL: float = 5.0
     SERIAL_READ_INTERVAL: float = 0.02
 
@@ -37,6 +43,7 @@ class Config:
     MODE_PROGRAM: str = "program"
     DEFAULT_STEP_SPEED: float = 0.01
     DEFAULT_STEP_SIZE: float = 0.05
+    MIN_STEP_SIZE: float = 0.001      # mm; matches the GUI's three-decimal position precision
     SPEED_KEY_INCREMENT: float = 0.001
     STEP_SPEED_KEY_INCREMENT: float = 0.01
     TARGET_KEY_INCREMENT: float = 0.1

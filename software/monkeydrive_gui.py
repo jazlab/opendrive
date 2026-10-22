@@ -12,13 +12,14 @@ License: MIT
 import csv
 import json
 import logging
+import math
 import time
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Callable
 
 import tkinter as tk
-from tkinter import ttk, messagebox, filedialog
+from tkinter import ttk, messagebox, filedialog, font as tkfont
 
 # Configure logging
 logging.basicConfig(
@@ -29,6 +30,7 @@ logger = logging.getLogger(__name__)
 
 
 from monkeydrive.config import Config
+from monkeydrive.console_theme import ConsoleTheme as Theme
 from monkeydrive.dialogs import InstructionsWindow, NotesWindow, ProgramLoadWindow, SettingsWindow
 from monkeydrive.models import InstructionStep, MotorState, TrajectoryState
 from monkeydrive.protocol import SerialProtocol
@@ -74,11 +76,13 @@ class MonkeyDriveApp:
         self._step_key_is_jogging: bool = False
         self._step_key_hold_job = None
         self._step_key_release_job = None
+        self._closing = False
 
         # Serial manager
         self._serial_manager = SerialManager(
             on_position_update=self._on_position_update,
-            on_connection_lost=self._on_connection_lost
+            on_connection_lost=self._on_connection_lost,
+            on_connected=self._on_connected,
         )
 
         # GUI variables (initialized in _build_ui)
@@ -115,13 +119,14 @@ class MonkeyDriveApp:
 
         self._style_widget_tree()
 
-        # Disable resizing after UI is built
+        # Keep the console usable with platform font and display scaling.
         self._fit_window_to_content()
-        self._root.resizable(False, False)
+        self._root.resizable(True, True)
 
         # Start auto-save timer
         self._schedule_auto_save()
         self._schedule_viewer_process_poll()
+        self._poll_serial_events()
 
         # Handle window close
         self._root.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -148,28 +153,33 @@ class MonkeyDriveApp:
     def _configure_light_theme(self):
         """Force readable colors on older macOS Tk builds."""
         for option, value in (
-            ("*Background", Config.COLOR_BG),
-            ("*Foreground", Config.COLOR_FG),
-            ("*Entry.Background", Config.COLOR_ENTRY_BG),
-            ("*Entry.Foreground", Config.COLOR_FG),
-            ("*Text.Background", Config.COLOR_ENTRY_BG),
-            ("*Text.Foreground", Config.COLOR_FG),
-            ("*Button.Background", Config.COLOR_ENTRY_BG),
-            ("*Button.Foreground", Config.COLOR_FG),
+            ("*Background", Theme.COLOR_BG),
+            ("*Foreground", Theme.COLOR_FG),
+            ("*Entry.Background", Theme.COLOR_ENTRY_BG),
+            ("*Entry.Foreground", Theme.COLOR_FG),
+            ("*Text.Background", Theme.COLOR_ENTRY_BG),
+            ("*Text.Foreground", Theme.COLOR_FG),
+            ("*Button.Background", Theme.COLOR_ENTRY_BG),
+            ("*Button.Foreground", Theme.COLOR_FG),
         ):
             self._root.option_add(option, value)
 
         self._root.tk_setPalette(
-            background=Config.COLOR_BG,
-            foreground=Config.COLOR_FG,
-            activeBackground=Config.COLOR_ACTIVE_BG,
-            activeForeground=Config.COLOR_FG,
-            highlightColor=Config.COLOR_SELECT_BG,
-            selectBackground=Config.COLOR_SELECT_BG,
-            selectForeground=Config.COLOR_ENTRY_BG,
+            background=Theme.COLOR_BG,
+            foreground=Theme.COLOR_FG,
+            activeBackground=Theme.COLOR_ACTIVE_BG,
+            activeForeground=Theme.COLOR_FG,
+            highlightColor=Theme.COLOR_SELECT_BG,
+            selectBackground=Theme.COLOR_SELECT_BG,
+            selectForeground=Theme.COLOR_ENTRY_BG,
         )
-        self._root.configure(background=Config.COLOR_BG)
+        self._root.configure(background=Theme.COLOR_BG)
 
+        self._console_font = tkfont.nametofont("TkDefaultFont").copy()
+        self._console_font.configure(size=11)
+        self._readout_font = self._console_font.copy()
+        self._readout_font.configure(size=13, weight="bold")
+        self._root.option_add("*Font", self._console_font)
         style = ttk.Style(self._root)
         try:
             style.theme_use("clam")
@@ -177,12 +187,26 @@ class MonkeyDriveApp:
             pass
         style.configure(
             "TCombobox",
-            fieldbackground=Config.COLOR_ENTRY_BG,
-            background=Config.COLOR_ENTRY_BG,
-            foreground=Config.COLOR_FG,
-            selectbackground=Config.COLOR_SELECT_BG,
-            selectforeground=Config.COLOR_ENTRY_BG,
+            font=self._console_font,
+            fieldbackground=Theme.COLOR_ENTRY_BG,
+            background=Theme.COLOR_ENTRY_BG,
+            foreground=Theme.COLOR_FG,
+            selectbackground=Theme.COLOR_SELECT_BG,
+            selectforeground=Theme.COLOR_ENTRY_BG,
         )
+
+        style.configure("Console.TButton", font=self._console_font, padding=(10, 6), background="#ffffff",
+                        foreground=Theme.COLOR_FG, bordercolor="#dce2e9", relief="flat")
+        style.map("Console.TButton", background=[("active", "#eaf1fa")],
+                  foreground=[("disabled", "#929ba7")])
+        style.configure("Primary.Console.TButton", background="#225da8", foreground="white")
+        style.map("Primary.Console.TButton", background=[("active", "#194b89")],
+                  foreground=[("disabled", "#b7c6da"), ("!disabled", "white")])
+        style.configure("Pause.Console.TButton", foreground="#a52d36")
+        style.configure("Selected.Console.TButton", background="#eaf1fa", foreground="#225da8")
+        style.configure("Console.TLabel", font=self._console_font, background=Theme.COLOR_BG, foreground="#626e7d")
+        style.configure("Title.Console.TLabel", font=(self._console_font.actual("family"), 26, "bold"),
+                        foreground=Theme.COLOR_FG)
 
     def _style_widget_tree(self, widget=None):
         """Apply explicit colors to Tk widgets that may ignore the app palette."""
@@ -190,25 +214,25 @@ class MonkeyDriveApp:
 
         try:
             if isinstance(widget, (tk.Tk, tk.Toplevel, tk.Frame)):
-                widget.configure(background=Config.COLOR_BG)
+                widget.configure(background=Theme.COLOR_BG)
             elif isinstance(widget, tk.Label):
                 if getattr(widget, "_monkeydrive_role", "") != "mode_tab":
-                    widget.configure(background=Config.COLOR_BG, foreground=Config.COLOR_FG)
+                    widget.configure(background=Theme.COLOR_BG, foreground=Theme.COLOR_FG)
             elif isinstance(widget, tk.Checkbutton):
                 widget.configure(
-                    background=Config.COLOR_BG,
-                    foreground=Config.COLOR_FG,
-                    activebackground=Config.COLOR_ACTIVE_BG,
-                    activeforeground=Config.COLOR_FG,
-                    selectcolor=Config.COLOR_ENTRY_BG,
+                    background=Theme.COLOR_BG,
+                    foreground=Theme.COLOR_FG,
+                    activebackground=Theme.COLOR_ACTIVE_BG,
+                    activeforeground=Theme.COLOR_FG,
+                    selectcolor=Theme.COLOR_ENTRY_BG,
                 )
             elif isinstance(widget, tk.Radiobutton):
                 widget.configure(
-                    background=Config.COLOR_BG,
-                    foreground=Config.COLOR_FG,
-                    activebackground=Config.COLOR_ACTIVE_BG,
-                    activeforeground=Config.COLOR_FG,
-                    selectcolor=Config.COLOR_ENTRY_BG,
+                    background=Theme.COLOR_BG,
+                    foreground=Theme.COLOR_FG,
+                    activebackground=Theme.COLOR_ACTIVE_BG,
+                    activeforeground=Theme.COLOR_FG,
+                    selectcolor=Theme.COLOR_ENTRY_BG,
                 )
             elif isinstance(widget, tk.Button):
                 role = getattr(widget, "_monkeydrive_role", "")
@@ -216,27 +240,29 @@ class MonkeyDriveApp:
                     pass
                 else:
                     widget.configure(
-                        background=Config.COLOR_ENTRY_BG,
-                        foreground=Config.COLOR_FG,
-                        activebackground=Config.COLOR_ACTIVE_BG,
-                        activeforeground=Config.COLOR_FG,
-                        highlightbackground=Config.COLOR_BG,
+                        background=Theme.COLOR_ENTRY_BG,
+                        foreground=Theme.COLOR_FG,
+                        activebackground=Theme.COLOR_ACTIVE_BG,
+                        activeforeground=Theme.COLOR_FG,
+                        highlightbackground=Theme.COLOR_BG,
                         borderwidth=1,
                     )
             elif isinstance(widget, tk.Entry):
                 readonly_bg = widget.cget("readonlybackground")
                 widget.configure(
-                    background=Config.COLOR_ENTRY_BG,
-                    foreground=Config.COLOR_FG,
-                    insertbackground=Config.COLOR_FG,
-                    readonlybackground=readonly_bg or Config.COLOR_READONLY_BG,
-                    disabledforeground=Config.COLOR_FG,
+                    background=Theme.COLOR_ENTRY_BG,
+                    foreground=Theme.COLOR_FG,
+                    insertbackground=Theme.COLOR_FG,
+                    readonlybackground=readonly_bg or Theme.COLOR_READONLY_BG,
+                    disabledforeground=Theme.COLOR_FG,
+                    relief="flat", borderwidth=0, highlightthickness=1,
+                    highlightbackground="#dce2e9", highlightcolor="#225da8",
                 )
             elif isinstance(widget, tk.Text):
                 widget.configure(
-                    background=Config.COLOR_ENTRY_BG,
-                    foreground=Config.COLOR_FG,
-                    insertbackground=Config.COLOR_FG,
+                    background=Theme.COLOR_ENTRY_BG,
+                    foreground=Theme.COLOR_FG,
+                    insertbackground=Theme.COLOR_FG,
                 )
         except tk.TclError:
             pass
@@ -246,93 +272,75 @@ class MonkeyDriveApp:
 
         if widget is self._root:
             self._refresh_mode_buttons()
+            for state, row in zip(self._motor_states, self._motor_widgets):
+                self._apply_row_selection_style(row, state.is_selected)
 
     def _fit_window_to_content(self):
-        """Resize the fixed-size window to match the current layout."""
+        """Fit mode contents while preserving space the user has added."""
         self._root.update_idletasks()
-        self._root.geometry(f"{self._root.winfo_reqwidth()}x{self._root.winfo_reqheight()}")
-
-    # -------------------------------------------------------------------------
-    # UI Construction
-    # -------------------------------------------------------------------------
+        width = max(980, self._root.winfo_reqwidth())
+        height = self._root.winfo_reqheight()
+        self._root.minsize(width, height)
+        self._root.geometry(f"{max(width, self._root.winfo_width())}x{max(height, self._root.winfo_height())}")
 
     def _build_ui(self):
-        """Build the main UI."""
-        # Main container
-        main_frame = tk.Frame(self._root, padx=15, pady=15)
-        main_frame.pack(fill=tk.BOTH, expand=True)
-
-        top_frame = tk.Frame(main_frame)
-        top_frame.pack(fill=tk.X, pady=(0, 12))
-
-        primary_frame = tk.Frame(top_frame)
-        primary_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 16))
-
-        utility_frame = tk.Frame(top_frame)
-        utility_frame.pack(side=tk.RIGHT, anchor='ne')
-
-        self._build_port_selection(primary_frame)
-        self._build_control_buttons(primary_frame)
-        self._build_utility_buttons(utility_frame)
-
-        # Container for Headers and Motor Rows (Grid Layout)
-        self._motors_container = tk.Frame(main_frame)
+        main = tk.Frame(self._root, padx=24, pady=20)
+        main.pack(fill=tk.BOTH, expand=True)
+        header = tk.Frame(main)
+        header.pack(fill=tk.X, pady=(0, 22))
+        # Override the application-wide *Font option, which takes precedence over ttk styles.
+        ttk.Label(header, text="MonkeyDrive", style="Title.Console.TLabel",
+                  font=(self._console_font.actual("family"), 26, "bold")).pack(side=tk.LEFT)
+        self._build_port_selection(header)
+        toolbar = tk.Frame(main)
+        toolbar.pack(fill=tk.X, pady=(0, 16))
+        self._mode_toolbar = tk.Frame(toolbar)
+        self._mode_toolbar.pack(side=tk.LEFT)
+        utilities = tk.Frame(toolbar)
+        utilities.pack(side=tk.RIGHT)
+        self._build_utility_buttons(utilities)
+        self._step_options = tk.Frame(main)
+        self._step_options.pack(fill=tk.X)
+        ttk.Separator(main).pack(fill=tk.X)
+        self._motors_container = tk.Frame(main, pady=8)
         self._motors_container.pack(fill=tk.BOTH, expand=True)
+        ttk.Separator(main).pack(fill=tk.X, pady=(12, 12))
+        footer = tk.Frame(main)
+        footer.pack(fill=tk.X)
+        self._selection_text = tk.StringVar(value="")
+        ttk.Label(footer, textvariable=self._selection_text, style="Console.TLabel").pack(anchor="w", pady=(0, 10))
+        self._build_control_buttons(footer)
+        ttk.Label(main, text="Positions in mm  /  Double-click a position or note to edit",
+                  style="Console.TLabel").pack(anchor="w", pady=(4, 0))
 
-    def _build_port_selection(self, parent: tk.Frame):
-        """Build the port selection UI section."""
-        port_frame = tk.Frame(parent)
-        port_frame.pack(fill=tk.X, pady=(0, 10))
-
-        tk.Label(port_frame, text="Port:").pack(side=tk.LEFT)
-
+    def _build_port_selection(self, parent):
+        connection = tk.Frame(parent)
+        connection.pack(side=tk.RIGHT)
+        self._connection_text = tk.StringVar(value="Disconnected")
+        ttk.Label(connection, textvariable=self._connection_text, style="Console.TLabel").pack(side=tk.LEFT, padx=(0, 12))
         self._port_var = tk.StringVar(value=self._saved_port)
-        self._port_combo = ttk.Combobox(
-            port_frame, textvariable=self._port_var,
-            width=40, state='readonly'
-        )
+        self._port_combo = ttk.Combobox(connection, textvariable=self._port_var, width=24, state="readonly")
         if self._saved_port:
-            self._port_combo['values'] = [self._saved_port]
-        self._port_combo.pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
-        self._port_combo.bind('<Button-1>', self._refresh_ports)
+            self._port_combo["values"] = [self._saved_port]
+        self._port_combo.pack(side=tk.LEFT, padx=(0, 8))
+        self._port_combo.bind("<Button-1>", self._refresh_ports)
+        self._connect_btn = ttk.Button(connection, text="Connect", command=self._on_connect, style="Console.TButton")
+        self._connect_btn.pack(side=tk.LEFT)
 
-    def _build_utility_buttons(self, parent: tk.Frame):
-        """Build connection and utility buttons."""
-        utility_button_width = 18
-        self._connect_btn = tk.Button(
-            parent, text="Connect", command=self._on_connect,
-            width=utility_button_width
-        )
-        self._connect_btn.pack(fill=tk.X)
-
-        tk.Button(
-            parent, text="Settings", command=self._on_settings,
-            width=utility_button_width
-        ).pack(fill=tk.X, pady=(8, 0))
-
-        tk.Button(
-            parent, text="Anatomy", command=self._on_anatomy,
-            width=utility_button_width
-        ).pack(fill=tk.X, pady=(8, 0))
-
-        tk.Button(
-            parent, text="Probe Summary", command=self._on_probe_summary,
-            width=utility_button_width
-        ).pack(fill=tk.X, pady=(8, 0))
-
-        self._trajectory_summary_btn = tk.Button(
-            parent, text="Trajectory Summary", command=self._on_trajectory_summary,
-            state=tk.NORMAL if self._has_loaded_anatomy() else tk.DISABLED,
-            width=utility_button_width
-        )
-        self._trajectory_summary_btn.pack(fill=tk.X, pady=(8, 0))
+    def _build_utility_buttons(self, parent):
+        for label, command in (("Anatomy", self._on_anatomy),
+                               ("Trajectories", self._on_trajectory_summary),
+                               ("Probes", self._on_probe_summary),
+                               ("Settings", self._on_settings)):
+            button = ttk.Button(parent, text=label, command=command, style="Console.TButton")
+            button.pack(side=tk.LEFT, padx=(5, 0))
+            if label == "Trajectories":
+                self._trajectory_summary_btn = button
+                button.configure(state=tk.NORMAL if self._has_loaded_anatomy() else tk.DISABLED)
 
     def _build_control_buttons(self, parent: tk.Frame):
         """Build the main control buttons."""
-        mode_frame = tk.Frame(parent)
-        mode_frame.pack(pady=(4, 8))
-
-        tk.Label(mode_frame, text="Mode:").pack(side=tk.LEFT, padx=(0, 8))
+        mode_frame = self._mode_toolbar
 
         self._mode_var = tk.StringVar(value=self._saved_mode)
         self._mode_buttons = {}
@@ -341,21 +349,14 @@ class MonkeyDriveApp:
             ("Step", Config.MODE_STEP),
             ("Program", Config.MODE_PROGRAM),
         ):
-            button = tk.Label(
-                mode_frame,
-                text=label,
-                width=10,
-                padx=12,
-                pady=5,
-                cursor="hand2",
-            )
-            button._monkeydrive_role = "mode_tab"
-            button.bind("<Button-1>", lambda _event, mode=value: self._select_mode(mode))
+            button = ttk.Button(mode_frame, text=label, width=9,
+                                command=lambda mode=value: self._select_mode(mode),
+                                style="Console.TButton")
             button.pack(side=tk.LEFT)
             self._mode_buttons[value] = button
         self._refresh_mode_buttons()
 
-        self._step_settings_frame = tk.Frame(parent)
+        self._step_settings_frame = tk.Frame(self._step_options)
         self._step_settings_frame.pack(pady=(0, 10))
 
         self._step_speed_var = tk.StringVar(value=f"{self._saved_step_speed:g}")
@@ -365,7 +366,7 @@ class MonkeyDriveApp:
         step_speed_entry = tk.Entry(
             self._step_settings_frame, textvariable=self._step_speed_var,
             width=Config.ENTRY_WIDTH, state='readonly',
-            readonlybackground=Config.COLOR_ENTRY_BG
+            readonlybackground=Theme.COLOR_ENTRY_BG
         )
         self._step_speed_entry = step_speed_entry
         step_speed_entry.pack(side=tk.LEFT, padx=(0, 15))
@@ -381,7 +382,7 @@ class MonkeyDriveApp:
         step_size_entry = tk.Entry(
             self._step_settings_frame, textvariable=self._step_size_var,
             width=Config.ENTRY_WIDTH, state='readonly',
-            readonlybackground=Config.COLOR_ENTRY_BG
+            readonlybackground=Theme.COLOR_ENTRY_BG
         )
         self._step_size_entry = step_size_entry
         step_size_entry.pack(side=tk.LEFT)
@@ -389,7 +390,7 @@ class MonkeyDriveApp:
         self._bind_numeric_stepper(
             step_size_entry, self._step_size_var,
             Config.STEP_SIZE_KEY_INCREMENT, decimals=3,
-            min_value=Config.STEP_SIZE_KEY_INCREMENT
+            min_value=Config.MIN_STEP_SIZE
         )
 
         self._target_controls_frame = tk.Frame(parent)
@@ -461,7 +462,9 @@ class MonkeyDriveApp:
         group = tk.Frame(parent)
         group.pack(side=tk.LEFT, padx=padx)
         for text, command in buttons:
-            button = tk.Button(group, text=text, command=command, width=width)
+            button = ttk.Button(group, text=text, command=command, width=width,
+                                style="Primary.Console.TButton" if text in ("Run", "Step Up", "Step Down")
+                                else "Pause.Console.TButton" if text == "Pause" else "Console.TButton")
             button.pack(side=tk.LEFT, padx=2)
 
     def _build_header_row(self):
@@ -470,14 +473,14 @@ class MonkeyDriveApp:
         adjust_frame = tk.Frame(self._motors_container)
         adjust_frame.grid(row=0, column=0, sticky='w', padx=(0, 5), pady=Config.HEADER_PAD_Y)
         
-        tk.Button(
+        ttk.Button(
             adjust_frame, text="+", command=self._add_motor,
-            font=('TkDefaultFont', 9), width=2
+            width=2, style="Console.TButton"
         ).pack(side=tk.LEFT, padx=1)
         
-        tk.Button(
+        ttk.Button(
             adjust_frame, text="-", command=self._remove_motor,
-            font=('TkDefaultFont', 9), width=2
+            width=2, style="Console.TButton"
         ).pack(side=tk.LEFT, padx=1)
 
         if self._is_step_mode():
@@ -498,17 +501,17 @@ class MonkeyDriveApp:
             ]
         else:
             labels = [
-                (1, "Speed (mm/s):"),
-                (2, "Target (mm):"),
-                (3, "Absolute (mm):"),
-                (4, "Relative (mm):"),
+                (1, "Absolute (mm)"),
+                (2, "Relative (mm)"),
+                (3, "Target (mm)"),
+                (4, "Speed (mm/s)"),
                 (5, "Notes:"),
             ]
 
         for col, text in labels:
-            tk.Label(
-                self._motors_container, text=text, anchor='w'
-            ).grid(row=0, column=col, sticky='w', padx=5, pady=Config.HEADER_PAD_Y)
+            ttk.Label(
+                self._motors_container, text=text.rstrip(":"), anchor='center', style="Console.TLabel"
+            ).grid(row=0, column=col, sticky='ew', padx=5, pady=Config.HEADER_PAD_Y)
 
     def _create_motor_row(self, state: MotorState, row_index: int) -> dict:
         """
@@ -522,11 +525,14 @@ class MonkeyDriveApp:
             Dictionary of widget references.
         """
         widgets = {}
+        stripe = tk.Frame(self._motors_container)
+        stripe.grid(row=row_index, column=0, columnspan=self._visible_column_count(), sticky="nsew", pady=1)
+        widgets["stripe"] = stripe
 
         # Col 0: Motor ID Label + Checkbox
         id_frame = tk.Frame(self._motors_container)
-        id_frame.grid(row=row_index, column=0, sticky='w', padx=(0, 5), pady=Config.ROW_PAD_Y)
-        widgets['row_frames'] = [id_frame]
+        id_frame.grid(row=row_index, column=0, sticky='w', padx=(0, 5), pady=10)
+        widgets['row_frames'] = [stripe, id_frame]
 
         widgets['motor_label'] = tk.Label(id_frame, text=f"Drive {state.motor_id}:", width=8, anchor='w')
         widgets['motor_label'].pack(side=tk.LEFT)
@@ -539,14 +545,14 @@ class MonkeyDriveApp:
         )
         widgets['checkbox'].pack(side=tk.LEFT)
 
-        widgets['trajectory_button'] = tk.Button(
-            id_frame, text="Trajectory",
+        widgets['trajectory_button'] = ttk.Button(
+            id_frame, text="Trajectory", style="Console.TButton",
             command=lambda mid=state.motor_id: self._on_trajectory_click(mid),
             state=tk.NORMAL if self._has_loaded_anatomy() else tk.DISABLED
         )
         widgets['trajectory_button'].pack(side=tk.LEFT, padx=(4, 0))
 
-        visible_widgets = [id_frame]
+        visible_widgets = [stripe, id_frame]
 
         if self._is_step_mode():
             absolute_col = 1
@@ -557,38 +563,38 @@ class MonkeyDriveApp:
             relative_col = 6
             notes_col = 7
 
-            widgets['instructions_button'] = tk.Button(
+            widgets['instructions_button'] = ttk.Button(
                 self._motors_container,
-                text=self._instruction_button_text(state),
+                text=self._instruction_button_text(state), style="Console.TButton",
                 command=lambda mid=state.motor_id: self._on_instructions_click(mid),
                 width=14
             )
-            widgets['instructions_button'].grid(row=row_index, column=1, sticky='ew', padx=5, pady=Config.ROW_PAD_Y)
+            widgets['instructions_button'].grid(row=row_index, column=1, sticky='ew', padx=5, pady=10)
 
             widgets['program_step_var'] = tk.StringVar(value=self._program_step_text(state))
             widgets['program_step_entry'] = tk.Entry(
                 self._motors_container, textvariable=widgets['program_step_var'],
                 width=Config.ENTRY_WIDTH, state='readonly',
-                readonlybackground=Config.COLOR_READONLY_BG
+                readonlybackground=Theme.COLOR_READONLY_BG
             )
-            widgets['program_step_entry'].grid(row=row_index, column=2, sticky='ew', padx=5, pady=Config.ROW_PAD_Y)
+            widgets['program_step_entry'].grid(row=row_index, column=2, sticky='ew', padx=5, pady=10)
 
             instruction = self._current_instruction(state)
             widgets['speed_var'] = tk.StringVar(value=f"{instruction.speed:g}" if instruction else "")
             widgets['speed_entry'] = tk.Entry(
                 self._motors_container, textvariable=widgets['speed_var'],
                 width=Config.ENTRY_WIDTH, state='readonly',
-                readonlybackground=Config.COLOR_READONLY_BG
+                readonlybackground=Theme.COLOR_READONLY_BG
             )
-            widgets['speed_entry'].grid(row=row_index, column=3, sticky='ew', padx=5, pady=Config.ROW_PAD_Y)
+            widgets['speed_entry'].grid(row=row_index, column=3, sticky='ew', padx=5, pady=10)
 
             widgets['target_var'] = tk.StringVar(value=format_mm(instruction.target) if instruction else "")
             widgets['target_entry'] = tk.Entry(
                 self._motors_container, textvariable=widgets['target_var'],
                 width=Config.ENTRY_WIDTH, state='readonly',
-                readonlybackground=Config.COLOR_READONLY_BG
+                readonlybackground=Theme.COLOR_READONLY_BG
             )
-            widgets['target_entry'].grid(row=row_index, column=4, sticky='ew', padx=5, pady=Config.ROW_PAD_Y)
+            widgets['target_entry'].grid(row=row_index, column=4, sticky='ew', padx=5, pady=10)
 
             visible_widgets.extend([
                 widgets['instructions_button'],
@@ -597,8 +603,8 @@ class MonkeyDriveApp:
                 widgets['target_entry'],
             ])
         else:
-            absolute_col = 3
-            relative_col = 4
+            absolute_col = 1
+            relative_col = 2
             notes_col = 5
 
             # Col 1: Speed entry
@@ -607,7 +613,7 @@ class MonkeyDriveApp:
                 self._motors_container, textvariable=widgets['speed_var'],
                 width=Config.ENTRY_WIDTH
             )
-            widgets['speed_entry'].grid(row=row_index, column=1, sticky='ew', padx=5, pady=Config.ROW_PAD_Y)
+            widgets['speed_entry'].grid(row=row_index, column=4, sticky='ew', padx=5, pady=10)
             widgets['speed_entry'].bind('<KeyRelease>', lambda e, mid=state.motor_id: self._on_speed_change(mid))
             widgets['speed_entry'].bind('<FocusOut>', lambda e, mid=state.motor_id: self._on_speed_change(mid))
             self._bind_numeric_stepper(
@@ -626,7 +632,7 @@ class MonkeyDriveApp:
                 self._motors_container, textvariable=widgets['target_var'],
                 width=Config.ENTRY_WIDTH
             )
-            widgets['target_entry'].grid(row=row_index, column=2, sticky='ew', padx=5, pady=Config.ROW_PAD_Y)
+            widgets['target_entry'].grid(row=row_index, column=3, sticky='ew', padx=5, pady=10)
             widgets['target_entry'].bind('<KeyRelease>', lambda e, mid=state.motor_id: self._on_target_change(mid))
             widgets['target_entry'].bind('<FocusOut>', lambda e, mid=state.motor_id: self._on_target_focus_out(mid))
             self._bind_numeric_stepper(
@@ -644,9 +650,9 @@ class MonkeyDriveApp:
         widgets['absolute_entry'] = tk.Entry(
             self._motors_container, textvariable=widgets['absolute_var'],
             width=Config.ENTRY_WIDTH, state='readonly',
-            readonlybackground='lightgray'
+            readonlybackground=Theme.COLOR_READONLY_BG
         )
-        widgets['absolute_entry'].grid(row=row_index, column=absolute_col, sticky='ew', padx=5, pady=Config.ROW_PAD_Y)
+        widgets['absolute_entry'].grid(row=row_index, column=absolute_col, sticky='ew', padx=5, pady=10)
         widgets['absolute_entry'].bind('<Double-Button-1>', lambda e, mid=state.motor_id: self._enable_absolute_edit(mid))
 
         # Relative position
@@ -654,9 +660,9 @@ class MonkeyDriveApp:
         widgets['relative_entry'] = tk.Entry(
             self._motors_container, textvariable=widgets['relative_var'],
             width=Config.ENTRY_WIDTH, state='readonly',
-            readonlybackground='lightgray'
+            readonlybackground=Theme.COLOR_READONLY_BG
         )
-        widgets['relative_entry'].grid(row=row_index, column=relative_col, sticky='ew', padx=5, pady=Config.ROW_PAD_Y)
+        widgets['relative_entry'].grid(row=row_index, column=relative_col, sticky='ew', padx=5, pady=10)
         widgets['relative_entry'].bind('<Double-Button-1>', lambda e, mid=state.motor_id: self._enable_relative_edit(mid))
 
         # Notes
@@ -667,8 +673,14 @@ class MonkeyDriveApp:
             width=Config.ENTRY_WIDTH, state='readonly',
             readonlybackground='white', cursor='hand2'
         )
-        widgets['notes_entry'].grid(row=row_index, column=notes_col, sticky='ew', padx=5, pady=Config.ROW_PAD_Y)
+        widgets['notes_entry'].grid(row=row_index, column=notes_col, sticky='ew', padx=5, pady=10)
         widgets['notes_entry'].bind('<Double-Button-1>', lambda e, mid=state.motor_id: self._on_notes_click(mid))
+
+        widgets["absolute_entry"].configure(font=self._readout_font, justify="center")
+        widgets["relative_entry"].configure(justify="center")
+        for key in ("speed_entry", "target_entry"):
+            if key in widgets:
+                widgets[key].configure(justify="right")
 
         # Store references to widgets for cleanup
         visible_widgets.extend([
@@ -745,13 +757,7 @@ class MonkeyDriveApp:
         for mode, button in self._mode_buttons.items():
             selected = mode == current
             try:
-                button.configure(
-                    relief=tk.RAISED if selected else tk.GROOVE,
-                    background=Config.COLOR_ENTRY_BG if selected else Config.COLOR_MODE_TAB_BG,
-                    foreground=Config.COLOR_FG,
-                    borderwidth=2 if selected else 1,
-                    font=('TkDefaultFont', 13, 'bold') if selected else ('TkDefaultFont', 13),
-                )
+                button.configure(style="Selected.Console.TButton" if selected else "Console.TButton")
             except tk.TclError:
                 pass
 
@@ -842,7 +848,7 @@ class MonkeyDriveApp:
 
     def _apply_row_selection_style(self, widgets: dict, selected: bool):
         """Visually mark rows selected for group movement commands."""
-        bg = Config.COLOR_ROW_SELECTED_BG if selected else Config.COLOR_BG
+        bg = Theme.COLOR_ROW_SELECTED_BG if selected else Theme.COLOR_BG
 
         for frame in widgets.get('row_frames', []):
             try:
@@ -854,9 +860,19 @@ class MonkeyDriveApp:
             widget = widgets.get(key)
             if widget:
                 try:
-                    widget.configure(background=bg, activebackground=bg)
+                    widget.configure(background=bg)
+                    if key == "checkbox":
+                        widget.configure(activebackground=bg)
                 except tk.TclError:
                     pass
+
+        for key in ("absolute_entry", "relative_entry"):
+            if key in widgets:
+                widgets[key].configure(readonlybackground=bg,
+                                       highlightthickness=0 if widgets[key].cget("state") == "readonly" else 1)
+        if hasattr(self, "_selection_text"):
+            count = sum(state.is_selected for state in self._motor_states)
+            self._selection_text.set(f"{count} of {len(self._motor_states)} drives selected  /  Movement commands apply to selected drives")
 
     def _bind_numeric_stepper(self, entry: tk.Entry, variable: tk.StringVar,
                               increment: float, decimals: int,
@@ -1078,8 +1094,7 @@ class MonkeyDriveApp:
         for state in selected:
             self._step_targets[state.motor_id] = target
             cmd = SerialProtocol.cmd_run(state.motor_id, speed, target, state.absolute)
-            self._serial_manager.send(cmd)
-            state.is_running = True
+            state.is_running = self._serial_manager.send(cmd)
 
         self._step_key_is_jogging = True
         self._focus_main_window()
@@ -1177,7 +1192,7 @@ class MonkeyDriveApp:
         if not entry:
             return
 
-        entry.config(state='normal', background=Config.COLOR_ENTRY_BG)
+        entry.config(state='normal', background=Theme.COLOR_ENTRY_BG)
         entry.focus_set()
         entry.select_range(0, tk.END)
         entry.bind('<Return>', lambda e, s=setting: self._confirm_step_setting_edit(s))
@@ -1192,15 +1207,17 @@ class MonkeyDriveApp:
 
         try:
             value = float(variable.get())
+            if not math.isfinite(value):
+                raise ValueError("Step setting must be finite")
             if setting == 'speed':
                 value = min(max(value, self._min_speed), self._max_speed)
-            elif value < Config.STEP_SIZE_KEY_INCREMENT:
-                value = Config.STEP_SIZE_KEY_INCREMENT
+            elif value < Config.MIN_STEP_SIZE:
+                value = Config.MIN_STEP_SIZE
         except ValueError:
-            value = self._min_speed if setting == 'speed' else Config.STEP_SIZE_KEY_INCREMENT
+            value = self._min_speed if setting == 'speed' else Config.MIN_STEP_SIZE
 
         variable.set(f"{value:.3f}")
-        entry.config(state='readonly', readonlybackground=Config.COLOR_ENTRY_BG)
+        entry.config(state='readonly', readonlybackground=Theme.COLOR_ENTRY_BG)
         self._root.focus_set()
 
     def _get_widgets(self, motor_id: int) -> Optional[dict]:
@@ -1255,8 +1272,9 @@ class MonkeyDriveApp:
             )
             return None
 
-        if step_size <= 0:
-            self._safe_popup(messagebox.showwarning, "Invalid Input", "Step size must be greater than 0mm.")
+        if not math.isfinite(step_size) or step_size < Config.MIN_STEP_SIZE:
+            self._safe_popup(messagebox.showwarning, "Invalid Input",
+                             f"Step size must be at least {Config.MIN_STEP_SIZE:g}mm.")
             return None
 
         step_size = round(step_size, 3)
@@ -1364,10 +1382,36 @@ class MonkeyDriveApp:
             if button:
                 button.configure(state=state)
 
+    def _poll_serial_events(self):
+        """Only this Tk callback renews the controller's GUI responsiveness lease."""
+        if self._closing:
+            return
+        try:
+            self._serial_manager.poll_events()
+            status = "Connected" if self._serial_manager.is_connected else "Connecting / disconnecting" if self._serial_manager.is_busy else "Disconnected"
+            if self._connection_text.get() != status:
+                self._connection_text.set(status)
+            if not self._serial_manager.is_busy and not self._serial_manager.is_connected:
+                self._connect_btn.config(text="Connect", state="normal")
+        except Exception:
+            logger.exception("Serial event handling failed; stopping connection")
+            self._serial_manager.disconnect()
+            self._on_connection_lost()
+        finally:
+            if not self._closing:
+                self._root.after(Config.GUI_POLL_INTERVAL_MS, self._poll_serial_events)
+
     def _schedule_viewer_process_poll(self):
         """Poll subprocess viewer events without blocking the GUI."""
-        self._poll_viewer_processes()
-        self._root.after(100, self._schedule_viewer_process_poll)
+        if self._closing:
+            return
+        try:
+            self._poll_viewer_processes()
+        except Exception:
+            logger.exception("Viewer event handling failed")
+        finally:
+            if not self._closing:
+                self._root.after(20, self._schedule_viewer_process_poll)
 
     def _poll_viewer_processes(self):
         """Handle pending messages from anatomy/trajectory subprocesses."""
@@ -1426,40 +1470,30 @@ class MonkeyDriveApp:
 
     def _safe_popup(self, popup_func: Callable, title: str, message: str = None, **kwargs):
         """
-        Show a popup dialog with automatic motor pause and heartbeat suspension.
-        
-        Suspends heartbeat checking and pauses all running motors before showing 
-        the dialog to prevent connection timeout during blocking dialogs.
+        Pause motors before a dialog. The GUI watchdog remains active.
         """
         paused_any = False
 
-        # Suspend heartbeat checking during the blocking dialog
-        self._serial_manager.heartbeat_suspended = True
+        # Pause all running motors
+        if self._serial_manager.is_connected:
+            for state in self._motor_states:
+                if state.is_running:
+                    self._serial_manager.send(SerialProtocol.cmd_pause(state.motor_id))
+                    state.is_running = False
+                    if state.instruction_status == "running":
+                        state.instruction_status = "paused"
+                        self._update_program_row(state.motor_id)
+                    paused_any = True
 
-        try:
-            # Pause all running motors
-            if self._serial_manager.is_connected:
-                for state in self._motor_states:
-                    if state.is_running:
-                        self._serial_manager.send(SerialProtocol.cmd_pause(state.motor_id))
-                        state.is_running = False
-                        paused_any = True
+        # Add safety note to message if motors were paused
+        if paused_any and message:
+            message += "\n\n(Stop commands have been queued for running motors.)"
 
-            # Add safety note to message if motors were paused
-            if paused_any and message:
-                message += "\n\n(Safety: Running motors have been automatically paused)"
-
-            # Show the popup
-            if message:
-                return popup_func(title, message, **kwargs)
-            else:
-                return popup_func(title=title, **kwargs)
-        
-        finally:
-            # Resume heartbeat checking and reset the timer
-            self._serial_manager.heartbeat_suspended = False
-            if self._serial_manager.is_connected:
-                self._serial_manager.last_heartbeat_received = time.time()
+        # Show the popup
+        if message:
+            return popup_func(title, message, **kwargs)
+        else:
+            return popup_func(title=title, **kwargs)
 
     # -------------------------------------------------------------------------
     # Event Handlers - Selection and Input
@@ -1515,7 +1549,7 @@ class MonkeyDriveApp:
                 state.is_running = False
 
             entry = widgets['absolute_entry']
-            entry.config(state='normal', background='white')
+            entry.config(state='normal', background='white', highlightthickness=1)
             entry.focus_set()
             entry.select_range(0, tk.END)
             entry.bind('<Return>', lambda e, mid=motor_id: self._on_absolute_confirm(mid))
@@ -1552,14 +1586,15 @@ class MonkeyDriveApp:
             )
             widgets['absolute_var'].set(format_mm(state.absolute))
 
-        entry.config(state='readonly', readonlybackground='lightgray')
+        entry.config(state='readonly', readonlybackground=Theme.COLOR_READONLY_BG)
+        self._apply_row_selection_style(widgets, state.is_selected)
 
     def _enable_relative_edit(self, motor_id: int):
         """Enable editing of relative position field."""
         widgets = self._get_widgets(motor_id)
         if widgets:
             entry = widgets['relative_entry']
-            entry.config(state='normal', background='white')
+            entry.config(state='normal', background='white', highlightthickness=1)
             entry.focus_set()
             entry.select_range(0, tk.END)
             entry.bind('<Return>', lambda e, mid=motor_id: self._on_relative_confirm(mid))
@@ -1585,7 +1620,8 @@ class MonkeyDriveApp:
 
         widgets['relative_var'].set(format_mm(state.relative))
 
-        entry.config(state='readonly', readonlybackground='lightgray')
+        entry.config(state='readonly', readonlybackground=Theme.COLOR_READONLY_BG)
+        self._apply_row_selection_style(widgets, state.is_selected)
 
     def _on_notes_click(self, motor_id: int):
         """Handle notes field click to open notes window."""
@@ -1827,21 +1863,23 @@ class MonkeyDriveApp:
                         self._update_program_row(state.motor_id)
             self._serial_manager.disconnect()
             self._step_targets.clear()
-            self._connect_btn.config(text="Connect")
+            self._connect_btn.config(text="Disconnecting...", state="disabled")
             self._focus_main_window()
         else:
             if self._serial_manager.connect(port):
-                self._send_settings_to_controller()
-                self._connect_btn.config(text="Disconnect")
-                self._save_state()
-                messagebox.showinfo("Connected", f"Connected to {port}")
-                self._focus_main_window()
+                self._connect_btn.config(text="Connecting...", state="disabled")
             else:
-                messagebox.showerror("Connection Failed", f"Could not connect to {port}")
-                self._focus_main_window()
+                self._connect_btn.config(text="Disconnecting...", state="disabled")
+
+    def _on_connected(self):
+        """Finish connection setup on the Tk thread after the worker opens the port."""
+        self._send_settings_to_controller()
+        self._connect_btn.config(text="Disconnect", state="normal")
+        self._save_state()
+        self._focus_main_window()
 
     def _on_connection_lost(self):
-        """Handle connection lost callback from serial manager."""
+        """Handle a queued connection-loss event on the Tk thread."""
         self._reset_step_key_state()
         for state in self._motor_states:
             if state.instruction_status == "running":
@@ -1853,11 +1891,13 @@ class MonkeyDriveApp:
 
     def _show_connection_lost_dialog(self):
         """Show connection lost dialog on main thread."""
-        self._connect_btn.config(text="Connect")
+        self._connect_btn.config(text="Connect", state="normal")
         messagebox.showwarning(
             "Connection Lost",
-            "Connection to console was lost. Any running motors have been paused. "
-            "Check physical connection and attempt to reconnect."
+            "The connection was stopped and a stop command was attempted. "
+            "If communication failed, the controller's heartbeat timeout stops motion.\n\n"
+            f"{self._serial_manager.failure_reason}\n\n"
+            "Check the controller before reconnecting. Movement will not resume automatically."
         )
 
     # -------------------------------------------------------------------------
@@ -1973,8 +2013,7 @@ class MonkeyDriveApp:
             cmd = SerialProtocol.cmd_run(
                 state.motor_id, state.speed, state.target, state.absolute
             )
-            self._serial_manager.send(cmd)
-            state.is_running = True
+            state.is_running = self._serial_manager.send(cmd)
 
     def _run_program_instructions(self, selected: list[MotorState]):
         """Run or continue selected motors' active instructions."""
@@ -2023,9 +2062,8 @@ class MonkeyDriveApp:
             cmd = SerialProtocol.cmd_run(
                 state.motor_id, state.speed, state.target, state.absolute
             )
-            self._serial_manager.send(cmd)
-            state.is_running = True
-            state.instruction_status = "running"
+            state.is_running = self._serial_manager.send(cmd)
+            state.instruction_status = "running" if state.is_running else "paused"
             self._update_program_row(state.motor_id)
 
     def _on_step(self, direction: int):
@@ -2063,8 +2101,7 @@ class MonkeyDriveApp:
         for state, target in target_updates:
             self._step_targets[state.motor_id] = target
             cmd = SerialProtocol.cmd_run(state.motor_id, speed, target, state.absolute)
-            self._serial_manager.send(cmd)
-            state.is_running = True
+            state.is_running = self._serial_manager.send(cmd)
 
         self._focus_main_window()
 
@@ -2104,9 +2141,6 @@ class MonkeyDriveApp:
                         state.instruction_status = "paused"
                         self._update_program_row(state.motor_id)
 
-        # Suspend heartbeat checking during the blocking file dialog
-        self._serial_manager.heartbeat_suspended = True
-
         try:
             filepath = filedialog.asksaveasfilename(
                 parent=self._root,
@@ -2142,12 +2176,6 @@ class MonkeyDriveApp:
 
         except IOError as e:
             messagebox.showerror("Export Error", f"Failed to export: {e}")
-
-        finally:
-            # Resume heartbeat checking and reset the timer
-            self._serial_manager.heartbeat_suspended = False
-            if self._serial_manager.is_connected:
-                self._serial_manager.last_heartbeat_received = time.time()
 
     def _on_load_program(self):
         """Open the program loader dialog."""
@@ -2337,7 +2365,7 @@ class MonkeyDriveApp:
     # -------------------------------------------------------------------------
 
     def _on_position_update(self, motor_id: int, absolute: float):
-        """Handle position update from serial manager."""
+        """Apply a queued position update on the Tk thread."""
         state = self._get_state(motor_id)
         if state:
             state.absolute = round(absolute, 3)
@@ -2345,7 +2373,7 @@ class MonkeyDriveApp:
             if not state.is_running:
                 self._step_targets.pop(motor_id, None)
 
-        self._root.after(0, lambda: self._update_position_display(motor_id, absolute))
+        self._update_position_display(motor_id, absolute)
 
     def _update_position_display(self, motor_id: int, absolute: float):
         """Update position display widgets on main thread."""
@@ -2391,8 +2419,10 @@ class MonkeyDriveApp:
             state.target,
             state.absolute,
         )
-        self._serial_manager.send(cmd)
-        state.is_running = True
+        state.is_running = self._serial_manager.send(cmd)
+        if not state.is_running:
+            state.instruction_status = "paused"
+            self._update_program_row(state.motor_id)
 
     def _update_trajectory_motor_position(self, motor_id: int):
         """Notify an open trajectory viewer that its motor position changed."""
@@ -2545,10 +2575,19 @@ class MonkeyDriveApp:
 
     def _on_close(self):
         """Handle window close event."""
-        if self._serial_manager.is_connected:
-            self._serial_manager.send(SerialProtocol.cmd_pause_all())
-
+        if self._closing:
+            return
+        self._closing = True
+        self._reset_step_key_state()
         self._serial_manager.disconnect()
+        self._shutdown_deadline = time.monotonic() + Config.SERIAL_SHUTDOWN_TIMEOUT
+        self._finish_close()
+
+    def _finish_close(self):
+        """Give the worker time to send its final stop without blocking Tk."""
+        if self._serial_manager.is_busy and time.monotonic() < self._shutdown_deadline:
+            self._root.after(Config.GUI_POLL_INTERVAL_MS, self._finish_close)
+            return
         self._save_state()
 
         for window in self._notes_windows.values():

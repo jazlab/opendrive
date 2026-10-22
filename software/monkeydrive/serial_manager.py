@@ -1,6 +1,9 @@
-"""Serial connection management for MonkeyDrive."""
+"""Single-owner serial I/O; callbacks are dispatched only by the GUI poller."""
 
+from collections import deque
+from dataclasses import dataclass, field
 import logging
+import math
 import threading
 import time
 from typing import Callable, Optional
@@ -13,218 +16,273 @@ from .protocol import SerialProtocol
 
 logger = logging.getLogger(__name__)
 
+
+@dataclass
+class _Session:
+    port_name: str
+    lock: object = field(default_factory=threading.Lock)
+    stop: threading.Event = field(default_factory=threading.Event)
+    wake: threading.Event = field(default_factory=threading.Event)
+    commands: deque = field(default_factory=deque)
+    pauses: set = field(default_factory=set)
+    positions: dict = field(default_factory=dict)
+    events: deque = field(default_factory=deque)
+    last_gui_tick: float = field(default_factory=time.monotonic)
+    connected: bool = False
+    failure: str = ""
+    thread: Optional[threading.Thread] = None
+
+
 class SerialManager:
-    """
-    Manages serial communication with the Teensy console.
-    
-    Handles connection management, heartbeat monitoring, and position updates
-    in background threads.
+    """Queue commands without device I/O on the caller's thread.
+
+    connect() means an attempt was accepted; send() means queued, not acknowledged.
+    Call poll_events() from Tk. Each worker owns one port, including open/close.
     """
 
-    def __init__(self, on_position_update: Callable, on_connection_lost: Callable):
-        """
-        Initialize SerialManager.
-        
-        Args:
-            on_position_update: Callback(motor_id, position) for position updates
-            on_connection_lost: Callback() when connection is lost
-        """
-        self._serial_port: Optional[serial.Serial] = None
-        self._port_name: str = ""
-        self._is_connected: bool = False
-
+    def __init__(self, on_position_update: Callable, on_connection_lost: Callable,
+                 on_connected: Optional[Callable] = None):
         self._on_position_update = on_position_update
         self._on_connection_lost = on_connection_lost
-
-        self._read_thread: Optional[threading.Thread] = None
-        self._heartbeat_thread: Optional[threading.Thread] = None
-        self._running: bool = False
-
-        self._last_heartbeat_received: float = 0.0
-        self._lock = threading.Lock()
-        self._connection_lost_notified: bool = False
-        self._heartbeat_suspended: bool = False
+        self._on_connected = on_connected
+        self._session: Optional[_Session] = None
+        self._owner_thread = threading.get_ident()
 
     @property
     def is_connected(self) -> bool:
-        """Return current connection status."""
-        return self._is_connected
-
-    @is_connected.setter
-    def is_connected(self, value: bool):
-        """Set connection status."""
-        self._is_connected = value
+        session = self._session
+        if session is None:
+            return False
+        with session.lock:
+            return session.connected and not session.stop.is_set()
 
     @property
-    def heartbeat_suspended(self) -> bool:
-        """Return whether heartbeat checking is suspended."""
-        return self._heartbeat_suspended
-
-    @heartbeat_suspended.setter
-    def heartbeat_suspended(self, value: bool):
-        """Set heartbeat suspension status."""
-        self._heartbeat_suspended = value
+    def is_busy(self) -> bool:
+        """True until the previous worker has finished closing its port."""
+        session = self._session
+        return bool(session and session.thread and session.thread.is_alive())
 
     @property
-    def last_heartbeat_received(self) -> float:
-        """Return timestamp of last heartbeat."""
-        return self._last_heartbeat_received
-
-    @last_heartbeat_received.setter
-    def last_heartbeat_received(self, value: float):
-        """Set timestamp of last heartbeat."""
-        self._last_heartbeat_received = value
+    def failure_reason(self) -> str:
+        session = self._session
+        if session is None:
+            return ""
+        with session.lock:
+            return session.failure
 
     @staticmethod
     def list_ports() -> list:
-        """Return list of available serial port names."""
-        ports = serial.tools.list_ports.comports()
-        return [port.device for port in ports]
+        return [port.device for port in serial.tools.list_ports.comports()]
 
     def connect(self, port_name: str) -> bool:
-        """
-        Connect to the specified serial port.
-        
-        Args:
-            port_name: Name of the serial port to connect to.
-            
-        Returns:
-            True if connection successful, False otherwise.
-        """
-        try:
-            self.disconnect()
-
-            self._serial_port = serial.Serial(
-                port=port_name,
-                baudrate=Config.BAUD_RATE,
-                timeout=Config.SERIAL_TIMEOUT
-            )
-
-            self._serial_port.reset_input_buffer()
-            self._serial_port.reset_output_buffer()
-
-            self._port_name = port_name
-            self._is_connected = True
-            self._running = True
-            self._last_heartbeat_received = time.time()
-            self._connection_lost_notified = False
-
-            self._read_thread = threading.Thread(target=self._read_loop, daemon=True)
-            self._read_thread.start()
-
-            self._heartbeat_thread = threading.Thread(target=self._heartbeat_loop, daemon=True)
-            self._heartbeat_thread.start()
-
-            return True
-
-        except serial.SerialException as e:
-            logger.error("Connection error: %s", e)
-            self._is_connected = False
+        """Open asynchronously; never overlap connection workers."""
+        self._assert_owner()
+        if self.is_busy:
             return False
+        session = _Session(port_name)
+        self._session = session
+        session.thread = threading.Thread(target=self._io_loop, args=(session,),
+                                          daemon=True, name="MonkeyDrive serial")
+        session.thread.start()
+        return True
 
     def disconnect(self):
-        """Disconnect from the serial port and stop background threads."""
-        self._running = False
-        self._is_connected = False
-
-        if self._serial_port and self._serial_port.is_open:
-            try:
-                self._serial_port.close()
-            except serial.SerialException:
-                pass
-
-        self._serial_port = None
-        self._port_name = ""
+        """Request stop and close without waiting on a device or joining in Tk."""
+        session = self._session
+        if session:
+            with session.lock:
+                session.connected = False
+                session.commands.clear()
+                session.positions.clear()
+                session.events.clear()
+                session.stop.set()
+            session.wake.set()
 
     def send(self, command: str) -> bool:
-        """
-        Send a command to the console.
-        
-        Args:
-            command: Command string to send.
-            
-        Returns:
-            True if send successful, False otherwise.
-        """
-        if not self._is_connected or not self._serial_port:
-            return False
-
-        try:
-            with self._lock:
-                self._serial_port.write(command.encode('utf-8'))
-                self._serial_port.flush()
-            return True
-        except serial.SerialException as e:
-            if self._running:
-                logger.error("Send error: %s", e)
-            return False
-
-    def _read_loop(self):
-        """Background thread loop for reading serial data."""
-        buffer = ""
-        while self._running:
-            try:
-                if (self._serial_port and 
-                    self._serial_port.is_open and 
-                    self._serial_port.in_waiting > 0):
-                    
-                    chunk = self._serial_port.read(
-                        self._serial_port.in_waiting
-                    ).decode('utf-8', errors='ignore')
-                    buffer += chunk
-
-                    while '\n' in buffer:
-                        line, buffer = buffer.split('\n', 1)
-                        line = line.strip()
-                        if line:
-                            self._handle_response(line)
-
-            except (OSError, serial.SerialException) as e:
-                if self._running:
-                    logger.error("Device disconnected: %s", e)
-                    self._running = False
-                    self._is_connected = False
-                    if not self._connection_lost_notified:
-                        self._connection_lost_notified = True
-                        self._on_connection_lost()
-                break
-
-            except Exception as e:
-                if self._running:
-                    logger.error("Read error: %s", e)
-
-            time.sleep(Config.SERIAL_READ_INTERVAL)
-
-    def _heartbeat_loop(self):
-        """Background thread loop for heartbeat monitoring."""
-        while self._running:
-            if not self._heartbeat_suspended:
-                self.send(SerialProtocol.cmd_heartbeat())
-
-                elapsed = time.time() - self._last_heartbeat_received
-                if elapsed > Config.HEARTBEAT_TIMEOUT:
-                    if self._is_connected and not self._connection_lost_notified:
-                        self._is_connected = False
-                        self._connection_lost_notified = True
-                        self._on_connection_lost()
-
-            time.sleep(Config.HEARTBEAT_INTERVAL)
-
-    def _handle_response(self, response: str):
-        """Process a response from the console."""
-        parsed = SerialProtocol.parse_response(response)
+        """Queue a command; pauses supersede queued movement for their motors."""
+        parsed = SerialProtocol.parse_response(command)
         if not parsed:
-            return
-
+            return False
         cmd, args = parsed
-
-        if cmd == "HEARTBEAT_ACK":
-            self._last_heartbeat_received = time.time()
-
-        elif cmd == "POS" and len(args) >= 2:
+        if cmd not in {"RUN", "TARGET", "CONFIG", "PAUSE", "PAUSE_ALL"}:
+            return False
+        motor_id = None
+        if cmd in {"RUN", "TARGET", "PAUSE"}:
             try:
                 motor_id = int(args[0])
-                position = float(args[1])
-                self._on_position_update(motor_id, position)
             except (ValueError, IndexError):
-                pass
+                return False
+            if not 1 <= motor_id <= Config.MAX_MOTORS:
+                return False
+        session = self._session
+        if session is None:
+            return False
+        with session.lock:
+            if not session.connected or session.stop.is_set():
+                return False
+            if time.monotonic() - session.last_gui_tick > Config.GUI_WATCHDOG_TIMEOUT:
+                self._fail_locked(session, "Control window stopped responding")
+                return False
+            if cmd in {"PAUSE", "PAUSE_ALL"}:
+                session.commands = deque(
+                    item for item in session.commands
+                    if item[0] not in {"RUN", "TARGET"}
+                    or (cmd == "PAUSE" and item[1] != motor_id)
+                )
+                if cmd == "PAUSE_ALL":
+                    session.pauses.clear()
+                    session.pauses.add(None)
+                elif None not in session.pauses:
+                    session.pauses.add(motor_id)
+            elif len(session.commands) >= Config.SERIAL_COMMAND_QUEUE_LIMIT:
+                self._fail_locked(session, "Serial command queue overflow")
+                return False
+            else:
+                session.commands.append((cmd, motor_id, command))
+        session.wake.set()
+        return True
+
+    def poll_events(self):
+        """Renew GUI liveness and deliver a bounded snapshot on the Tk thread."""
+        self._assert_owner()
+        session = self._session
+        if session is None:
+            return
+        with session.lock:
+            # Never renew an expired lease, even if the worker was delayed too.
+            if (session.connected and not session.stop.is_set()
+                    and time.monotonic() - session.last_gui_tick > Config.GUI_WATCHDOG_TIMEOUT):
+                self._fail_locked(session, "Control window stopped responding")
+            session.last_gui_tick = time.monotonic()
+            events = list(session.events)
+            session.events.clear()
+            positions = list(session.positions.items())
+            session.positions.clear()
+        for event in events:
+            if self._session is not session:
+                return
+            if event == "connected" and self.is_connected and self._on_connected:
+                self._on_connected()
+            elif event == "lost":
+                self._on_connection_lost()
+        for motor_id, position in positions:
+            if self._session is not session:
+                return
+            self._on_position_update(motor_id, position)
+
+    def _assert_owner(self):
+        if threading.get_ident() != self._owner_thread:
+            raise RuntimeError("Serial lifecycle and event polling belong to the GUI thread")
+
+    @staticmethod
+    def _fail_locked(session: _Session, reason: str):
+        if session.stop.is_set():
+            return
+        session.failure = reason
+        session.connected = False
+        session.commands.clear()
+        session.positions.clear()
+        session.events.clear()
+        session.events.append("lost")
+        session.stop.set()
+        session.wake.set()
+        # No logging or device I/O while holding this lock: GUI calls acquire it.
+
+    @staticmethod
+    def _write(port, command: str):
+        payload = command.encode("utf-8")
+        if port.write(payload) != len(payload):
+            raise serial.SerialTimeoutException("Incomplete serial write")
+        # flush() can wait indefinitely for the driver. Do not use it.
+
+    def _io_loop(self, session: _Session):
+        port = None
+        try:
+            port = serial.Serial(port=session.port_name, baudrate=Config.BAUD_RATE,
+                                 timeout=0, write_timeout=Config.SERIAL_WRITE_TIMEOUT)
+            port.reset_input_buffer()
+            port.reset_output_buffer()
+            self._write(port, SerialProtocol.cmd_pause_all())
+            now = time.monotonic()
+            with session.lock:
+                if session.stop.is_set():
+                    return
+                if now - session.last_gui_tick > Config.GUI_WATCHDOG_TIMEOUT:
+                    self._fail_locked(session, "Control window stopped responding")
+                    return
+                session.connected = True
+                session.events.append("connected")
+            last_ack = now
+            next_heartbeat = now
+            buffer = b""
+            while not session.stop.is_set():
+                session.wake.clear()
+                with session.lock:
+                    if time.monotonic() - session.last_gui_tick > Config.GUI_WATCHDOG_TIMEOUT:
+                        self._fail_locked(session, "Control window stopped responding")
+                if session.stop.is_set():
+                    break
+                chunk = port.read(min(port.in_waiting, Config.SERIAL_RECEIVE_LIMIT))
+                buffer += chunk
+                while b"\n" in buffer:
+                    line, buffer = buffer.split(b"\n", 1)
+                    parsed = SerialProtocol.parse_response(line.decode("ascii", errors="replace"))
+                    if not parsed:
+                        continue
+                    cmd, args = parsed
+                    if cmd == "HEARTBEAT_ACK":
+                        last_ack = time.monotonic()
+                    elif cmd == "POS" and len(args) >= 2:
+                        try:
+                            motor_id, position = int(args[0]), float(args[1])
+                        except ValueError:
+                            continue
+                        if (1 <= motor_id <= Config.MAX_MOTORS and math.isfinite(position)
+                                and Config.MIN_ABSOLUTE_POS <= position <= Config.MAX_ABSOLUTE_POS):
+                            with session.lock:
+                                session.positions[motor_id] = position
+                if len(buffer) > Config.SERIAL_RECEIVE_LIMIT:
+                    raise serial.SerialException("Oversized serial response")
+                now = time.monotonic()
+                with session.lock:
+                    if now - last_ack > Config.HEARTBEAT_TIMEOUT:
+                        self._fail_locked(session, "Controller heartbeat timed out")
+                    if now - session.last_gui_tick > Config.GUI_WATCHDOG_TIMEOUT:
+                        self._fail_locked(session, "Control window stopped responding")
+                    if session.stop.is_set():
+                        break
+                    command = None
+                    if session.pauses:
+                        motor_id = session.pauses.pop()
+                        command = (SerialProtocol.cmd_pause_all() if motor_id is None
+                                   else SerialProtocol.cmd_pause(motor_id))
+                    elif session.commands:
+                        command = session.commands.popleft()[2]
+                if command:
+                    self._write(port, command)
+                # Recheck after a potentially slow write before renewing motion permission.
+                now = time.monotonic()
+                with session.lock:
+                    if now - session.last_gui_tick > Config.GUI_WATCHDOG_TIMEOUT:
+                        self._fail_locked(session, "Control window stopped responding")
+                    alive = not session.stop.is_set()
+                if alive and now >= next_heartbeat:
+                    self._write(port, SerialProtocol.cmd_heartbeat())
+                    next_heartbeat = time.monotonic() + Config.HEARTBEAT_INTERVAL
+                session.wake.wait(Config.SERIAL_READ_INTERVAL)
+        except Exception as exc:
+            with session.lock:
+                self._fail_locked(session, str(exc))
+        finally:
+            with session.lock:
+                session.connected = False
+            if port is not None:
+                try:
+                    self._write(port, SerialProtocol.cmd_pause_all())
+                except Exception:
+                    logger.warning("Final stop failed; controller heartbeat timeout is the fallback")
+                finally:
+                    try:
+                        port.close()
+                    except Exception:
+                        logger.exception("Failed to close serial port")

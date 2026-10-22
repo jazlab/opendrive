@@ -8,13 +8,15 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from .anatomy import (
-    AnatomyDependencyError,
     AnatomyLoader,
     AnatomyOrientation,
     AnatomySliceRenderer,
     AnatomyVolume,
 )
 from .config import Config
+from .console_theme import ConsoleTheme as Theme
+from .viewer_theme import configure_viewer, style_viewer, viewer_button, viewer_heading
+from .viewer_tasks import LatestWorker
 
 
 class AnatomyViewer(tk.Toplevel):
@@ -37,6 +39,7 @@ class AnatomyViewer(tk.Toplevel):
     ):
         """Initialize the anatomy viewer."""
         super().__init__(parent)
+        configure_viewer(self)
 
         self._on_path_change = on_path_change
         self._on_orientation_change = on_orientation_change
@@ -45,6 +48,8 @@ class AnatomyViewer(tk.Toplevel):
         self._orientation_scanner_key = initial_orientation_scanner
         self._original_volume: AnatomyVolume | None = None
         self._volume: AnatomyVolume | None = None
+        self._render_worker = LatestWorker(self)
+        self._render_signatures = {}
         self._image_refs: dict[int, tk.PhotoImage] = {}
         self._image_canvases: dict[int, tk.Canvas] = {}
         self._image_items: dict[int, int] = {}
@@ -72,26 +77,32 @@ class AnatomyViewer(tk.Toplevel):
         if self._initial_path and Path(self._initial_path).exists():
             self.after(100, lambda: self._load_path(self._initial_path, remember=False))
 
+    def destroy(self):
+        self._render_worker.close()
+        super().destroy()
+
     def _build_ui(self):
-        container = tk.Frame(self, padx=12, pady=12)
+        container = tk.Frame(self, padx=20, pady=18)
         container.pack(fill=tk.BOTH, expand=True)
+        viewer_heading(container, 'Anatomy', 'Inspect MRI slices and adjust orientation, contrast, and zoom.')
 
         toolbar = tk.Frame(container)
-        toolbar.pack(fill=tk.X, pady=(0, 10))
+        toolbar.pack(fill=tk.X, pady=(0, 16))
 
-        tk.Button(toolbar, text="Open NIfTI", command=self._open_nifti).pack(side=tk.LEFT, padx=(0, 6))
-        tk.Button(toolbar, text="Open DICOM File", command=self._open_dicom_file).pack(side=tk.LEFT, padx=(0, 6))
-        tk.Button(toolbar, text="Open DICOM Folder", command=self._open_dicom_folder).pack(side=tk.LEFT, padx=(0, 6))
-        tk.Button(toolbar, text="Orientation", command=self._open_orientation_dialog).pack(side=tk.LEFT, padx=(0, 18))
+        viewer_button(toolbar, text="Open NIfTI", command=self._open_nifti).pack(side=tk.LEFT, padx=(0, 6))
+        viewer_button(toolbar, text="Open DICOM File", command=self._open_dicom_file).pack(side=tk.LEFT, padx=(0, 6))
+        viewer_button(toolbar, text="Open DICOM Folder", command=self._open_dicom_folder).pack(side=tk.LEFT, padx=(0, 6))
+        viewer_button(toolbar, text="Orientation", command=self._open_orientation_dialog).pack(side=tk.LEFT, padx=(0, 18))
 
         tk.Label(toolbar, text="Zoom:").pack(side=tk.LEFT, padx=(0, 6))
-        tk.Button(toolbar, text="-", command=lambda: self._adjust_zoom(-0.1), width=3).pack(side=tk.LEFT)
+        viewer_button(toolbar, text="-", command=lambda: self._adjust_zoom(-0.1), width=3).pack(side=tk.LEFT)
         tk.Scale(
             toolbar, from_=0.5, to=3.0, resolution=0.1, orient=tk.HORIZONTAL,
             variable=self._zoom_var, command=self._on_zoom_change,
-            showvalue=True, length=180
+            showvalue=False, length=180
         ).pack(side=tk.LEFT, padx=4)
-        tk.Button(toolbar, text="+", command=lambda: self._adjust_zoom(0.1), width=3).pack(side=tk.LEFT)
+        viewer_button(toolbar, text="+", command=lambda: self._adjust_zoom(0.1), width=3).pack(side=tk.LEFT)
+        tk.Label(toolbar, textvariable=self._zoom_var, width=4, anchor="center").pack(side=tk.LEFT, padx=(6, 0))
 
         viewer_frame = tk.Frame(container)
         viewer_frame.pack(fill=tk.BOTH, expand=True)
@@ -172,30 +183,31 @@ class AnatomyViewer(tk.Toplevel):
             self._load_path(path)
 
     def _load_path(self, path: str, remember: bool = True):
-        try:
-            volume = AnatomyLoader.load(path)
-        except AnatomyDependencyError as exc:
-            messagebox.showwarning("Missing MRI Dependencies", str(exc), parent=self)
-            return
-        except Exception as exc:
-            messagebox.showerror("Anatomy Load Failed", str(exc), parent=self)
-            return
+        self._render_worker.invalidate()
+        self._render_signatures.clear()
+        self._status_var.set("Loading anatomy")
 
-        self._original_volume = volume
-        self._volume = volume
-        self._orientation_status = ""
-        if remember:
-            self._orientation_actual_key = ""
-            self._orientation_scanner_key = ""
-            if self._on_orientation_change:
-                self._on_orientation_change("", "")
-        else:
-            self._apply_saved_orientation_if_available()
-        self._update_volume_labels()
-        self._set_all_slices_to_middle()
-        self._render_all_planes()
-        if remember and self._on_path_change:
-            self._on_path_change(path)
+        def complete(volume, error):
+            if error is not None:
+                self._status_var.set(f"Could not load anatomy: {error}")
+                return
+            self._original_volume = volume
+            self._volume = volume
+            self._orientation_status = ""
+            if remember:
+                self._orientation_actual_key = ""
+                self._orientation_scanner_key = ""
+                if self._on_orientation_change:
+                    self._on_orientation_change("", "")
+            else:
+                self._apply_saved_orientation_if_available()
+            self._update_volume_labels()
+            self._set_all_slices_to_middle()
+            self._render_all_planes()
+            if remember and self._on_path_change:
+                self._on_path_change(path)
+
+        self._render_worker.submit('load', lambda: AnatomyLoader.load(path), complete)
 
     def _update_volume_labels(self):
         if not self._volume:
@@ -310,33 +322,34 @@ class AnatomyViewer(tk.Toplevel):
         if not canvas or not canvas.winfo_exists():
             return
 
-        try:
-            low, high = self._contrast_limits()
-            image_data = AnatomySliceRenderer.slice_to_ppm(
-                self._volume,
-                axis,
-                self._slice_vars[axis].get(),
-                contrast_low=low,
-                contrast_high=high,
-                zoom=self._zoom_var.get(),
-            )
-            image_ref = tk.PhotoImage(data=image_data, format="PPM")
-            self._draw_plane(axis, image_ref)
-            self._image_refs[axis] = image_ref
-        except tk.TclError:
+        volume = self._volume
+        low, high = self._contrast_limits()
+        index, zoom = self._slice_vars[axis].get(), self._zoom_var.get()
+        signature = (id(volume), index, low, high, zoom)
+        if self._render_signatures.get(axis) == signature:
+            image_ref = self._image_refs.get(axis)
+            if image_ref:
+                self._draw_plane(axis, image_ref)
             return
-        except Exception as exc:
-            canvas.delete("all")
-            canvas.create_text(
-                canvas.winfo_width() // 2,
-                canvas.winfo_height() // 2,
-                text=f"Could not render slice:\n{exc}",
-                fill="#ffffff",
-            )
+        self._render_signatures[axis] = signature
+
+        def compute():
+            return AnatomySliceRenderer.slice_to_ppm(
+                volume, axis, index, contrast_low=low, contrast_high=high, zoom=zoom)
+
+        def complete(data, error):
+            if error is not None:
+                self._render_signatures.pop(axis, None)
+                self._status_var.set(f"Could not render slice: {error}")
+                return
+            image_ref = tk.PhotoImage(data=data, format="PPM", master=self)
+            self._image_refs[axis] = image_ref
+            self._draw_plane(axis, image_ref)
+
+        self._render_worker.submit(('plane', axis), compute, complete)
 
     def _draw_plane(self, axis: int, image_ref: tk.PhotoImage):
         canvas = self._image_canvases[axis]
-        canvas.update_idletasks()
         width = max(1, canvas.winfo_width())
         height = max(1, canvas.winfo_height())
         image_width = image_ref.width()
@@ -361,7 +374,6 @@ class AnatomyViewer(tk.Toplevel):
         if not image_ref or not canvas or not canvas.winfo_exists():
             return
 
-        canvas.update_idletasks()
         width = max(1, canvas.winfo_width())
         height = max(1, canvas.winfo_height())
         image_width = image_ref.width()
@@ -458,44 +470,7 @@ class AnatomyViewer(tk.Toplevel):
         return "break"
 
     def _style_widget_tree(self, widget=None):
-        widget = widget or self
-
-        try:
-            if isinstance(widget, (tk.Tk, tk.Toplevel, tk.Frame)):
-                widget.configure(background=Config.COLOR_BG)
-            elif isinstance(widget, tk.Canvas):
-                if widget not in self._image_canvases.values():
-                    widget.configure(background=Config.COLOR_BG, highlightthickness=0)
-            elif isinstance(widget, tk.Label):
-                widget.configure(background=Config.COLOR_BG, foreground=Config.COLOR_FG)
-            elif isinstance(widget, tk.Button):
-                widget.configure(
-                    background=Config.COLOR_ENTRY_BG,
-                    foreground=Config.COLOR_FG,
-                    activebackground=Config.COLOR_ACTIVE_BG,
-                    activeforeground=Config.COLOR_FG,
-                    highlightbackground=Config.COLOR_BG,
-                )
-            elif isinstance(widget, tk.Radiobutton):
-                widget.configure(
-                    background=Config.COLOR_BG,
-                    foreground=Config.COLOR_FG,
-                    activebackground=Config.COLOR_ACTIVE_BG,
-                    activeforeground=Config.COLOR_FG,
-                    selectcolor=Config.COLOR_ENTRY_BG,
-                )
-            elif isinstance(widget, tk.Scale):
-                widget.configure(
-                    background=Config.COLOR_BG,
-                    foreground=Config.COLOR_FG,
-                    activebackground=Config.COLOR_ACTIVE_BG,
-                    highlightbackground=Config.COLOR_BG,
-                )
-        except tk.TclError:
-            pass
-
-        for child in widget.winfo_children():
-            self._style_widget_tree(child)
+        style_viewer(self, widget)
 
 
 class ContrastWindowControl(tk.Canvas):
@@ -513,7 +488,7 @@ class ContrastWindowControl(tk.Canvas):
             parent,
             width=self.WIDTH,
             height=self.HEIGHT,
-            background=Config.COLOR_BG,
+            background=Theme.COLOR_BG,
             highlightthickness=0,
         )
         self._low_var = low_var
@@ -604,6 +579,7 @@ class OrientationWindow(tk.Toplevel):
 
     def __init__(self, parent: AnatomyViewer, on_apply, on_restore):
         super().__init__(parent)
+        configure_viewer(self)
 
         self._on_apply = on_apply
         self._on_restore = on_restore
@@ -643,10 +619,10 @@ class OrientationWindow(tk.Toplevel):
         button_frame = tk.Frame(frame)
         button_frame.grid(row=1, column=0, columnspan=2, pady=(16, 0))
 
-        tk.Button(
+        viewer_button(
             button_frame, text="Restore Original", command=self._restore, width=16
         ).pack(side=tk.LEFT, padx=(0, 10))
-        self._apply_button = tk.Button(
+        self._apply_button = viewer_button(
             button_frame, text="Apply", command=self._apply, width=12
         )
         self._apply_button.pack(side=tk.LEFT)
@@ -678,31 +654,4 @@ class OrientationWindow(tk.Toplevel):
         self.destroy()
 
     def _style_widget_tree(self, widget=None):
-        widget = widget or self
-
-        try:
-            if isinstance(widget, (tk.Tk, tk.Toplevel, tk.Frame)):
-                widget.configure(background=Config.COLOR_BG)
-            elif isinstance(widget, tk.Label):
-                widget.configure(background=Config.COLOR_BG, foreground=Config.COLOR_FG)
-            elif isinstance(widget, tk.Button):
-                widget.configure(
-                    background=Config.COLOR_ENTRY_BG,
-                    foreground=Config.COLOR_FG,
-                    activebackground=Config.COLOR_ACTIVE_BG,
-                    activeforeground=Config.COLOR_FG,
-                    highlightbackground=Config.COLOR_BG,
-                )
-            elif isinstance(widget, tk.Radiobutton):
-                widget.configure(
-                    background=Config.COLOR_BG,
-                    foreground=Config.COLOR_FG,
-                    activebackground=Config.COLOR_ACTIVE_BG,
-                    activeforeground=Config.COLOR_FG,
-                    selectcolor=Config.COLOR_ENTRY_BG,
-                )
-        except tk.TclError:
-            pass
-
-        for child in widget.winfo_children():
-            self._style_widget_tree(child)
+        style_viewer(self, widget)

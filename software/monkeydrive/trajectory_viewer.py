@@ -6,7 +6,6 @@ import io
 import queue
 import threading
 import time
-from pathlib import Path
 from typing import Callable
 
 import tkinter as tk
@@ -15,7 +14,6 @@ import numpy as np
 from PIL import Image, ImageTk
 
 from .anatomy import (
-    AnatomyDependencyError,
     AnatomyLoader,
     AnatomyOrientation,
     AnatomySliceRenderer,
@@ -23,6 +21,9 @@ from .anatomy import (
 )
 from .anatomy_viewer import ContrastWindowControl
 from .config import Config
+from .console_theme import ConsoleTheme as Theme
+from .viewer_theme import configure_viewer, style_viewer, viewer_button, viewer_heading
+from .viewer_tasks import LatestWorker
 from .models import TrajectoryState
 from .probe_map_colors import color_from_lut, load_shank_lut
 from .spikeglx_client import SpikeGLXConfig, SpikeGLXLiveClient, SpikeGLXUnavailable
@@ -50,6 +51,7 @@ class TrajectoryViewer(tk.Toplevel):
     ):
         """Initialize a trajectory viewer."""
         super().__init__(parent)
+        configure_viewer(self)
 
         self._motor_id = motor_id
         self._trajectory = TrajectoryState.from_dict(trajectory.to_dict())
@@ -58,7 +60,11 @@ class TrajectoryViewer(tk.Toplevel):
         self._orientation_actual_key = orientation_actual
         self._orientation_scanner_key = orientation_scanner
         self._on_save = on_save
+        self._original_volume = None
         self._volume: AnatomyVolume | None = None
+        self._render_worker = LatestWorker(self)
+        self._render_signatures = {}
+        self._source_signatures = {}
 
         self._image_refs: dict[int, tk.PhotoImage] = {}
         self._source_images: dict[int, Image.Image] = {}
@@ -126,6 +132,7 @@ class TrajectoryViewer(tk.Toplevel):
 
     def destroy(self):
         """Stop live probe-map work before destroying this window."""
+        self._render_worker.close()
         self._stop_probe_map_worker()
         self._cancel_probe_map_overlay_draw()
         self._cancel_zoom_render()
@@ -135,27 +142,29 @@ class TrajectoryViewer(tk.Toplevel):
             pass
 
     def _build_ui(self):
-        container = tk.Frame(self, padx=12, pady=12)
+        container = tk.Frame(self, padx=20, pady=18)
         container.pack(fill=tk.BOTH, expand=True)
+        viewer_heading(container, f"Drive {self._motor_id} trajectory", 'Align the probe and target across three anatomical planes.')
 
         toolbar = tk.Frame(container)
-        toolbar.pack(fill=tk.X, pady=(0, 10))
+        toolbar.pack(fill=tk.X, pady=(0, 16))
 
         tk.Label(toolbar, text="Zoom:").pack(side=tk.LEFT, padx=(0, 6))
-        tk.Button(toolbar, text="-", command=lambda: self._adjust_zoom(-0.1), width=3).pack(side=tk.LEFT)
+        viewer_button(toolbar, text="-", command=lambda: self._adjust_zoom(-0.1), width=3).pack(side=tk.LEFT)
         tk.Scale(
             toolbar, from_=0.5, to=10.0, resolution=0.1, orient=tk.HORIZONTAL,
             variable=self._zoom_var, command=self._on_zoom_change,
-            showvalue=True, length=220
+            showvalue=False, length=220
         ).pack(side=tk.LEFT, padx=4)
-        tk.Button(toolbar, text="+", command=lambda: self._adjust_zoom(0.1), width=3).pack(side=tk.LEFT)
-        tk.Button(toolbar, text="Save", command=self._save_fields, width=8).pack(side=tk.LEFT, padx=(18, 0))
-        self._probe_button = tk.Button(
+        viewer_button(toolbar, text="+", command=lambda: self._adjust_zoom(0.1), width=3).pack(side=tk.LEFT)
+        tk.Label(toolbar, textvariable=self._zoom_var, width=4, anchor="center").pack(side=tk.LEFT, padx=(6, 0))
+        viewer_button(toolbar, text="Save", command=self._save_fields, width=8).pack(side=tk.LEFT, padx=(18, 0))
+        self._probe_button = viewer_button(
             toolbar, text=self._probe_button_text(),
             command=self._toggle_probe_location
         )
         self._probe_button.pack(side=tk.LEFT, padx=(6, 0))
-        self._target_button = tk.Button(
+        self._target_button = viewer_button(
             toolbar, text=self._target_button_text(),
             command=self._toggle_target_location
         )
@@ -164,7 +173,7 @@ class TrajectoryViewer(tk.Toplevel):
         viewer_frame = tk.Frame(container)
         viewer_frame.pack(fill=tk.BOTH, expand=True)
 
-        contrast_frame = tk.Frame(viewer_frame, width=112)
+        contrast_frame = tk.Frame(viewer_frame, width=132)
         contrast_frame.pack_propagate(False)
         contrast_frame.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 8))
         tk.Label(contrast_frame, text="Contrast").pack(anchor='n')
@@ -188,7 +197,7 @@ class TrajectoryViewer(tk.Toplevel):
         self._image_row = image_row
         image_row.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        probe_map_frame = tk.Frame(viewer_frame, padx=8, width=168)
+        probe_map_frame = tk.Frame(viewer_frame, padx=8, width=190)
         probe_map_frame.pack_propagate(False)
         probe_map_frame.pack(side=tk.RIGHT, fill=tk.Y, padx=(8, 0))
         tk.Label(probe_map_frame, text="SpikeGLX Map").pack(anchor='w')
@@ -202,7 +211,7 @@ class TrajectoryViewer(tk.Toplevel):
         self._add_probe_map_field(probe_map_frame, "Min mV:", self._probe_map_min_var, restart=False)
         self._add_probe_map_field(probe_map_frame, "Max mV:", self._probe_map_max_var, restart=False)
         self._add_probe_map_field(probe_map_frame, "Update ms:", self._probe_map_update_ms_var, restart=True)
-        tk.Button(
+        viewer_button(
             probe_map_frame,
             text="Retry map",
             command=self._restart_probe_map_worker,
@@ -213,7 +222,7 @@ class TrajectoryViewer(tk.Toplevel):
             textvariable=self._probe_map_status_var,
             anchor='w',
             justify=tk.LEFT,
-            wraplength=142,
+            wraplength=166,
             width=20,
         ).pack(fill=tk.X, pady=(8, 0))
 
@@ -228,7 +237,7 @@ class TrajectoryViewer(tk.Toplevel):
 
             header = tk.Frame(pane)
             header.pack(fill=tk.X)
-            collapse_button = tk.Button(
+            collapse_button = viewer_button(
                 header, text="<", width=2,
                 command=lambda plane_axis=axis: self._toggle_pane(plane_axis)
             )
@@ -350,33 +359,31 @@ class TrajectoryViewer(tk.Toplevel):
         return "break"
 
     def _load_anatomy(self):
-        if not self._anatomy_path or not Path(self._anatomy_path).exists():
-            self._status_var.set("Open the Anatomy Viewer and load an MRI before using trajectories.")
+        if not self._anatomy_path:
+            self._status_var.set("No anatomy loaded")
             return
+        self._render_worker.invalidate()
+        self._render_signatures.clear()
+        self._volume = None
+        self._status_var.set("Loading anatomy")
+        path = self._anatomy_path
+        original = self._original_volume
+        actual, scanner = self._orientation_actual_key, self._orientation_scanner_key
 
-        try:
-            self._volume = AnatomyLoader.load(self._anatomy_path)
-            self._apply_orientation_to_loaded_volume()
-        except AnatomyDependencyError as exc:
-            messagebox.showwarning("Missing MRI Dependencies", str(exc), parent=self)
-            return
-        except Exception as exc:
-            messagebox.showerror("Trajectory Load Failed", str(exc), parent=self)
-            return
+        def compute():
+            source = original if original is not None else AnatomyLoader.load(path)
+            volume = AnatomyOrientation.correct_volume(source, actual, scanner) if actual and scanner else source
+            return source, volume
 
-        self._status_var.set(self._volume.display_name)
-        self._render_all()
+        def complete(result, error):
+            if error is not None:
+                self._status_var.set(f"Could not load anatomy: {error}")
+                return
+            self._original_volume, self._volume = result
+            self._status_var.set(self._volume.display_name)
+            self._render_all()
 
-    def _apply_orientation_to_loaded_volume(self):
-        if not self._volume:
-            return
-        if not (self._orientation_actual_key and self._orientation_scanner_key):
-            return
-        self._volume = AnatomyOrientation.correct_volume(
-            self._volume,
-            self._orientation_actual_key,
-            self._orientation_scanner_key,
-        )
+        self._render_worker.submit('load', compute, complete)
 
     def update_anatomy_orientation(self, actual_key: str, scanner_key: str):
         """Update orientation correction and reload/re-render anatomy."""
@@ -644,34 +651,44 @@ class TrajectoryViewer(tk.Toplevel):
         if not canvas or not canvas.winfo_exists():
             return
 
-        try:
-            center, horizontal, vertical, width_mm, height_mm = self._slice_geometry(axis)
-            image_data = AnatomySliceRenderer.oblique_slice_to_ppm(
-                self._volume,
-                center,
-                horizontal,
-                vertical,
-                width_mm,
-                height_mm,
-                contrast_low=self._contrast_low_var.get(),
-                contrast_high=self._contrast_high_var.get(),
-                zoom=1.0,
-            )
-            source_image = Image.open(io.BytesIO(image_data)).copy()
-            self._source_images[axis] = source_image
-            image_ref = self._scaled_photo_image(source_image)
-            self._draw_plane(axis, image_ref)
-            self._image_refs[axis] = image_ref
-        except tk.TclError:
+        geometry = self._slice_geometry(axis)
+        volume = self._volume
+        low, high = self._contrast_low_var.get(), self._contrast_high_var.get()
+        zoom = max(0.5, min(10.0, float(self._zoom_var.get())))
+        base_signature = (id(volume), low, high, *(tuple(v) if hasattr(v, '__iter__') else v for v in geometry))
+        signature = (base_signature, zoom)
+        if self._render_signatures.get(axis) == signature:
+            image_ref = self._image_refs.get(axis)
+            if image_ref:
+                self._draw_plane(axis, image_ref)
             return
-        except Exception as exc:
-            canvas.delete("all")
-            canvas.create_text(
-                canvas.winfo_width() // 2,
-                canvas.winfo_height() // 2,
-                text=f"Could not render trajectory:\n{exc}",
-                fill="#ffffff",
-            )
+        self._render_signatures[axis] = signature
+        cached = self._source_images.get(axis) if self._source_signatures.get(axis) == base_signature else None
+
+        def compute():
+            source = cached
+            if source is None:
+                data = AnatomySliceRenderer.oblique_slice_to_ppm(
+                    volume, *geometry, contrast_low=low, contrast_high=high, zoom=1.0)
+                source = Image.open(io.BytesIO(data)).copy()
+            scaled = source if abs(zoom - 1.0) < .01 else source.resize(
+                (max(1, round(source.width * zoom)), max(1, round(source.height * zoom))),
+                Image.Resampling.NEAREST)
+            return source, scaled
+
+        def complete(result, error):
+            if error is not None:
+                self._render_signatures.pop(axis, None)
+                self._status_var.set(f"Could not render trajectory: {error}")
+                return
+            source, scaled = result
+            image_ref = ImageTk.PhotoImage(scaled, master=self)
+            self._source_images[axis] = source
+            self._source_signatures[axis] = base_signature
+            self._image_refs[axis] = image_ref
+            self._draw_plane(axis, image_ref)
+
+        self._render_worker.submit(('plane', axis), compute, complete)
 
     def _slice_geometry(self, axis: int):
         transverse_x, transverse_y, probe_axis = self._trajectory_basis()
@@ -783,7 +800,6 @@ class TrajectoryViewer(tk.Toplevel):
 
     def _draw_plane(self, axis: int, image_ref: tk.PhotoImage):
         canvas = self._canvases[axis]
-        canvas.update_idletasks()
         width = max(1, canvas.winfo_width())
         height = max(1, canvas.winfo_height())
         image_width = image_ref.width()
@@ -1035,6 +1051,7 @@ class TrajectoryViewer(tk.Toplevel):
         self._offset_var.set(f"{self._trajectory.perpendicular_offset:g}")
         self._render_plane(2)
         self._redraw_inline_depth_lines()
+        self._on_save(self._motor_id, self._trajectory)
         return "break"
 
     def _on_target_scroll(self, event):
@@ -1093,70 +1110,7 @@ class TrajectoryViewer(tk.Toplevel):
         self._on_save(self._motor_id, self._trajectory)
 
     def _rescale_rendered_planes(self):
-        for _label, axis, _rotation_attr in self.PLANES:
-            source_image = self._source_images.get(axis)
-            if source_image is None:
-                continue
-            if self._pane_collapsed.get(axis, False):
-                continue
-            try:
-                image_ref = self._scaled_photo_image(source_image)
-                self._draw_plane(axis, image_ref)
-                self._image_refs[axis] = image_ref
-            except tk.TclError:
-                continue
-
-    def _scaled_photo_image(self, source_image: Image.Image) -> ImageTk.PhotoImage:
-        zoom = max(0.5, min(10.0, float(self._zoom_var.get())))
-        if abs(zoom - 1.0) < 0.01:
-            return ImageTk.PhotoImage(source_image)
-        width = max(1, int(round(source_image.width * zoom)))
-        height = max(1, int(round(source_image.height * zoom)))
-        scaled_image = source_image.resize((width, height), Image.Resampling.NEAREST)
-        return ImageTk.PhotoImage(scaled_image)
+        self._render_all()
 
     def _style_widget_tree(self, widget=None):
-        widget = widget or self
-
-        try:
-            if isinstance(widget, (tk.Tk, tk.Toplevel, tk.Frame)):
-                widget.configure(background=Config.COLOR_BG)
-            elif isinstance(widget, tk.Canvas):
-                if widget not in self._canvases.values():
-                    widget.configure(background=Config.COLOR_BG, highlightthickness=0)
-            elif isinstance(widget, tk.Label):
-                widget.configure(background=Config.COLOR_BG, foreground=Config.COLOR_FG)
-            elif isinstance(widget, tk.Button):
-                widget.configure(
-                    background=Config.COLOR_ENTRY_BG,
-                    foreground=Config.COLOR_FG,
-                    activebackground=Config.COLOR_ACTIVE_BG,
-                    activeforeground=Config.COLOR_FG,
-                    highlightbackground=Config.COLOR_BG,
-                )
-            elif isinstance(widget, tk.Checkbutton):
-                widget.configure(
-                    background=Config.COLOR_BG,
-                    foreground=Config.COLOR_FG,
-                    activebackground=Config.COLOR_ACTIVE_BG,
-                    activeforeground=Config.COLOR_FG,
-                    selectcolor=Config.COLOR_ENTRY_BG,
-                )
-            elif isinstance(widget, tk.Entry):
-                widget.configure(
-                    background=Config.COLOR_ENTRY_BG,
-                    foreground=Config.COLOR_FG,
-                    insertbackground=Config.COLOR_FG,
-                )
-            elif isinstance(widget, tk.Scale):
-                widget.configure(
-                    background=Config.COLOR_BG,
-                    foreground=Config.COLOR_FG,
-                    activebackground=Config.COLOR_ACTIVE_BG,
-                    highlightbackground=Config.COLOR_BG,
-                )
-        except tk.TclError:
-            pass
-
-        for child in widget.winfo_children():
-            self._style_widget_tree(child)
+        style_viewer(self, widget)

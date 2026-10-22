@@ -21,6 +21,39 @@ MonkeyDrive controls physical hardware. Before using it near electrodes, probes,
 
 The GUI and firmware include heartbeat/connection-loss handling. If communication is lost, the GUI and firmware are designed to stop motion, but this should still be tested with your hardware.
 
+### Connection responsiveness
+
+Serial opening, reading, writing, and closing run in one background worker. The
+GUI queues commands; a successful enqueue does not mean the firmware has
+acknowledged execution. Writes have a 200 ms timeout, and no blocking serial
+flush is used. Pause commands take priority and discard pending movement for
+the affected motors; an already in-flight command cannot be recalled.
+
+The main GUI renews a responsiveness lease every 20 ms. If it stops doing so
+for 1 second, the worker discards pending commands, attempts `PAUSE_ALL`, stops
+heartbeats, and closes the connection. Movement does not automatically resume
+when the GUI recovers. The firmware heartbeat timeout remains the fallback if
+the stop cannot be delivered; its 1-second timeout is checked every 500 ms, so
+this is not an instantaneous-stop guarantee. Native dialogs that prevent Tk
+timers from running can also trigger this disconnect.
+
+Connections open asynchronously, and reconnect is blocked until the previous
+worker finishes closing its port. Closing the GUI gives the worker up to one
+second to finish without blocking the interface. An unresponsive OS driver can
+outlast this deadline; the firmware timeout remains the fallback.
+
+Hardware-free regression tests (from the repository root):
+
+```bash
+cd software
+python -m unittest discover -s tests -v
+```
+
+The tests simulate stalled writes, unplugging, missing heartbeats, GUI stalls,
+stop priority, and reconnect races. Tk integration tests require a working
+desktop/Tk installation and skip when unavailable. They do not open a real
+serial device or read/write your saved application state.
+
 ## Software Setup
 
 From the repository root:
@@ -184,6 +217,14 @@ Each tile shows one drive with:
 - red target line
 
 The summary viewer runs in a separate subprocess so MRI rendering does not block the main control GUI.
+
+Anatomy loading and slice computation also run on a background worker inside
+each viewer. Obsolete render results are discarded, and zoom uses cached slices.
+Probe-position updates redraw overlays without resampling the summary MRI.
+Viewer communication keeps the latest position for each motor instead of
+replaying a backlog, and scrolling an unlocked probe plane updates the summary.
+The live perpendicular plane is refreshed at most every 100 ms; actual refresh
+time also depends on rendering time and controller updates.
 
 ## GUI Stability Stress Test
 

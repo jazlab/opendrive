@@ -9,6 +9,8 @@ import time
 import tkinter as tk
 
 from .config import Config
+from .console_theme import ConsoleTheme as Theme
+from .viewer_theme import configure_viewer, style_viewer, viewer_button, viewer_heading
 from .probe_map_colors import color_from_lut, load_shank_lut
 from .spikeglx_client import SpikeGLXConfig, SpikeGLXLiveClient, SpikeGLXUnavailable
 
@@ -18,6 +20,7 @@ class ProbeSummaryViewer(tk.Toplevel):
 
     def __init__(self, parent: tk.Tk):
         super().__init__(parent)
+        configure_viewer(self)
 
         self._events: queue.Queue = queue.Queue()
         self._stop_events: dict[int, threading.Event] = {}
@@ -61,8 +64,9 @@ class ProbeSummaryViewer(tk.Toplevel):
             pass
 
     def _build_ui(self):
-        container = tk.Frame(self, padx=12, pady=12)
+        container = tk.Frame(self, padx=20, pady=18)
         container.pack(fill=tk.BOTH, expand=True)
+        viewer_heading(container, 'Probe activity', 'Live SpikeGLX amplitude maps')
 
         toolbar = tk.Frame(container)
         toolbar.pack(fill=tk.X, pady=(0, 8))
@@ -70,8 +74,8 @@ class ProbeSummaryViewer(tk.Toplevel):
         self._add_field(toolbar, "Min mV:", self._min_var, width=7)
         self._add_field(toolbar, "Max mV:", self._max_var, width=7)
         self._add_field(toolbar, "Update ms:", self._update_ms_var, width=7)
-        tk.Button(toolbar, text="Apply", command=self._apply_settings, width=8).pack(side=tk.LEFT, padx=(6, 0))
-        tk.Button(toolbar, text="Retry", command=self._restart, width=8).pack(side=tk.LEFT, padx=(6, 0))
+        viewer_button(toolbar, text="Apply", command=self._apply_settings, width=8).pack(side=tk.LEFT, padx=(6, 0))
+        viewer_button(toolbar, text="Retry", command=self._restart, width=8).pack(side=tk.LEFT, padx=(6, 0))
 
         self._canvas = tk.Canvas(container, width=760, height=680, background="#dddddd", highlightthickness=0)
         self._canvas.pack(fill=tk.BOTH, expand=True)
@@ -429,28 +433,4 @@ class ProbeSummaryViewer(tk.Toplevel):
             return 500
 
     def _style_widget_tree(self, widget=None):
-        widget = widget or self
-        try:
-            if isinstance(widget, (tk.Tk, tk.Toplevel, tk.Frame)):
-                widget.configure(background=Config.COLOR_BG)
-            elif isinstance(widget, tk.Label):
-                widget.configure(background=Config.COLOR_BG, foreground=Config.COLOR_FG)
-            elif isinstance(widget, tk.Button):
-                widget.configure(
-                    background=Config.COLOR_ENTRY_BG,
-                    foreground=Config.COLOR_FG,
-                    activebackground=Config.COLOR_ACTIVE_BG,
-                    activeforeground=Config.COLOR_FG,
-                    highlightbackground=Config.COLOR_BG,
-                )
-            elif isinstance(widget, tk.Entry):
-                widget.configure(
-                    background=Config.COLOR_ENTRY_BG,
-                    foreground=Config.COLOR_FG,
-                    insertbackground=Config.COLOR_FG,
-                )
-        except tk.TclError:
-            return
-
-        for child in widget.winfo_children():
-            self._style_widget_tree(child)
+        style_viewer(self, widget)

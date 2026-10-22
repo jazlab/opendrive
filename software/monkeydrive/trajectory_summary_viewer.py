@@ -2,23 +2,27 @@
 
 from __future__ import annotations
 
+import io
 import math
 import queue
 import threading
 from typing import Iterable
 
 import tkinter as tk
-from tkinter import messagebox
 import numpy as np
+from PIL import Image, ImageTk
+
+from .viewer_tasks import LatestWorker
 
 from .anatomy import (
-    AnatomyDependencyError,
     AnatomyLoader,
     AnatomyOrientation,
     AnatomySliceRenderer,
     AnatomyVolume,
 )
 from .config import Config
+from .console_theme import ConsoleTheme as Theme
+from .viewer_theme import configure_viewer, style_viewer, viewer_button, viewer_heading
 from .models import MotorState, TrajectoryState
 from .probe_map_colors import color_from_lut, load_shank_lut
 from .spikeglx_client import SpikeGLXConfig, SpikeGLXLiveClient, SpikeGLXUnavailable
@@ -39,6 +43,7 @@ class TrajectorySummaryViewer(tk.Toplevel):
         orientation_scanner: str = "",
     ):
         super().__init__(parent)
+        configure_viewer(self)
 
         self._motor_states = {
             state.motor_id: MotorState.from_dict(state.to_dict())
@@ -47,7 +52,12 @@ class TrajectorySummaryViewer(tk.Toplevel):
         self._anatomy_path = anatomy_path
         self._orientation_actual_key = orientation_actual
         self._orientation_scanner_key = orientation_scanner
+        self._original_volume = None
         self._volume: AnatomyVolume | None = None
+        self._render_worker = LatestWorker(self)
+        self._render_signatures = {}
+        self._source_images = {}
+        self._source_signatures = {}
         self._status_var = tk.StringVar(value="Loading anatomy")
         self._view_vars: dict[int, tk.IntVar] = {}
         self._canvases: dict[int, tk.Canvas] = {}
@@ -79,6 +89,7 @@ class TrajectorySummaryViewer(tk.Toplevel):
         self.after(100, self._load_anatomy)
 
     def destroy(self):
+        self._render_worker.close()
         self._stop_all_probe_map_workers()
         try:
             super().destroy()
@@ -86,8 +97,9 @@ class TrajectorySummaryViewer(tk.Toplevel):
             pass
 
     def _build_ui(self):
-        container = tk.Frame(self, padx=12, pady=12)
+        container = tk.Frame(self, padx=20, pady=18)
         container.pack(fill=tk.BOTH, expand=True)
+        viewer_heading(container, 'Trajectories', 'Compare probe positions across drives.')
 
         self._grid_frame = tk.Frame(container)
         self._grid_frame.pack(fill=tk.BOTH, expand=True)
@@ -104,7 +116,7 @@ class TrajectorySummaryViewer(tk.Toplevel):
 
             header = tk.Frame(tile)
             header.pack(fill=tk.X)
-            tk.Label(header, text=f"Motor {motor_id}", font=("TkDefaultFont", 11, "bold")).pack(side=tk.LEFT)
+            tk.Label(header, text=f"Drive {motor_id}", font=("TkDefaultFont", 11, "bold")).pack(side=tk.LEFT)
             self._view_vars[motor_id] = tk.IntVar(value=self.INLINE)
             tk.Radiobutton(
                 header, text="Inline", variable=self._view_vars[motor_id], value=self.INLINE,
@@ -127,32 +139,28 @@ class TrajectorySummaryViewer(tk.Toplevel):
         if not self._anatomy_path:
             self._status_var.set("No anatomy loaded")
             return
+        self._render_worker.invalidate()
+        self._render_signatures.clear()
+        self._volume = None
+        self._status_var.set("Loading anatomy")
+        path = self._anatomy_path
+        original = self._original_volume
+        actual, scanner = self._orientation_actual_key, self._orientation_scanner_key
 
-        try:
-            self._volume = AnatomyLoader.load(self._anatomy_path)
-            self._apply_orientation_to_loaded_volume()
-        except AnatomyDependencyError as exc:
-            messagebox.showwarning("Missing MRI Dependencies", str(exc), parent=self)
-            self._status_var.set("Could not load anatomy")
-            return
-        except Exception as exc:
-            messagebox.showerror("Trajectory Summary Load Failed", str(exc), parent=self)
-            self._status_var.set("Could not load anatomy")
-            return
+        def compute():
+            source = original if original is not None else AnatomyLoader.load(path)
+            volume = AnatomyOrientation.correct_volume(source, actual, scanner) if actual and scanner else source
+            return source, volume
 
-        self._status_var.set(self._volume.display_name)
-        self._render_all()
+        def complete(result, error):
+            if error is not None:
+                self._status_var.set(f"Could not load anatomy: {error}")
+                return
+            self._original_volume, self._volume = result
+            self._status_var.set(self._volume.display_name)
+            self._render_all()
 
-    def _apply_orientation_to_loaded_volume(self):
-        if not self._volume:
-            return
-        if not (self._orientation_actual_key and self._orientation_scanner_key):
-            return
-        self._volume = AnatomyOrientation.correct_volume(
-            self._volume,
-            self._orientation_actual_key,
-            self._orientation_scanner_key,
-        )
+        self._render_worker.submit('load', compute, complete)
 
     def update_anatomy_orientation(self, actual_key: str, scanner_key: str):
         """Update orientation correction and reload/re-render anatomy."""
@@ -165,7 +173,7 @@ class TrajectorySummaryViewer(tk.Toplevel):
         if not state:
             return
         state.absolute = round(float(position), 3)
-        self._render_motor(state.motor_id)
+        self._redraw_motor_overlay(state.motor_id)
 
     def update_motor_state(self, state: MotorState):
         self._motor_states[state.motor_id] = MotorState.from_dict(state.to_dict())
@@ -284,32 +292,42 @@ class TrajectorySummaryViewer(tk.Toplevel):
             return
 
         trajectory = state.trajectory
-        try:
-            center, horizontal, vertical, width_mm, height_mm = self._slice_geometry(motor_id, trajectory)
-            image_data = AnatomySliceRenderer.oblique_slice_to_ppm(
-                self._volume,
-                center,
-                horizontal,
-                vertical,
-                width_mm,
-                height_mm,
-                max_size=max(220, min(canvas.winfo_width(), canvas.winfo_height()) - 10),
-                zoom=trajectory.zoom,
-            )
-            image_ref = tk.PhotoImage(data=image_data, format="PPM")
-            self._draw_motor(canvas, motor_id, state, image_ref, height_mm)
-            self._image_refs[motor_id] = image_ref
-            self._image_heights_mm[motor_id] = height_mm
-        except tk.TclError:
+        geometry = self._slice_geometry(motor_id, trajectory)
+        volume = self._volume
+        base_signature = (id(volume), *(tuple(v) if hasattr(v, '__iter__') else v for v in geometry))
+        size = max(220, min(canvas.winfo_width(), canvas.winfo_height()) - 10)
+        zoom = max(0.5, min(10.0, trajectory.zoom))
+        signature = (base_signature, size, zoom)
+        if self._render_signatures.get(motor_id) == signature:
+            self._redraw_motor_overlay(motor_id)
             return
-        except Exception as exc:
-            canvas.delete("all")
-            canvas.create_text(
-                canvas.winfo_width() // 2,
-                canvas.winfo_height() // 2,
-                text=f"Could not render:\n{exc}",
-                fill="#ffffff",
-            )
+        self._render_signatures[motor_id] = signature
+        cached = self._source_images.get(motor_id) if self._source_signatures.get(motor_id) == base_signature else None
+
+        def compute():
+            source = cached
+            if source is None:
+                data = AnatomySliceRenderer.oblique_slice_to_ppm(volume, *geometry, max_size=430, zoom=1.0)
+                source = Image.open(io.BytesIO(data)).copy()
+            scale = size * zoom / 430.0
+            scaled = source.resize((max(1, round(source.width * scale)), max(1, round(source.height * scale))), Image.Resampling.NEAREST)
+            return source, scaled
+
+        def complete(result, error):
+            if error is not None:
+                self._render_signatures.pop(motor_id, None)
+                self._status_var.set(f"Could not render Motor {motor_id}: {error}")
+                return
+            source, scaled = result
+            image_ref = ImageTk.PhotoImage(scaled, master=self)
+            self._source_images[motor_id] = source
+            self._source_signatures[motor_id] = base_signature
+            self._image_refs[motor_id] = image_ref
+            self._image_heights_mm[motor_id] = geometry[4]
+            # Read the newest state here, not the position when rendering started.
+            self._draw_motor(canvas, motor_id, self._motor_states[motor_id], image_ref, geometry[4])
+
+        self._render_worker.submit(('plane', motor_id), compute, complete)
 
     def _redraw_motor_overlay(self, motor_id: int):
         canvas = self._canvases.get(motor_id)
@@ -382,7 +400,6 @@ class TrajectorySummaryViewer(tk.Toplevel):
 
     def _draw_motor(self, canvas: tk.Canvas, motor_id: int, state: MotorState,
                     image_ref: tk.PhotoImage, height_mm: float):
-        canvas.update_idletasks()
         width = max(1, canvas.winfo_width())
         height = max(1, canvas.winfo_height())
         image_width = image_ref.width()
@@ -503,25 +520,4 @@ class TrajectorySummaryViewer(tk.Toplevel):
         return normalized * image_height
 
     def _style_widget_tree(self, widget=None):
-        widget = widget or self
-
-        try:
-            if isinstance(widget, (tk.Tk, tk.Toplevel, tk.Frame)):
-                widget.configure(background=Config.COLOR_BG)
-            elif isinstance(widget, tk.Canvas):
-                widget.configure(background="#000000", highlightthickness=0)
-            elif isinstance(widget, tk.Label):
-                widget.configure(background=Config.COLOR_BG, foreground=Config.COLOR_FG)
-            elif isinstance(widget, (tk.Button, tk.Radiobutton)):
-                widget.configure(
-                    background=Config.COLOR_BG,
-                    foreground=Config.COLOR_FG,
-                    activebackground=Config.COLOR_ACTIVE_BG,
-                    activeforeground=Config.COLOR_FG,
-                    highlightbackground=Config.COLOR_BG,
-                )
-        except tk.TclError:
-            return
-
-        for child in widget.winfo_children():
-            self._style_widget_tree(child)
+        style_viewer(self, widget)
