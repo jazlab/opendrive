@@ -739,6 +739,153 @@ class GuiSerialTests(unittest.TestCase):
             app._on_run_shortcut(SimpleNamespace(state=required))
             run.assert_called_once_with()
 
+    def test_compact_view_shrinks_six_drive_console_and_restores_full_size(self):
+        app = self.app
+        for _ in range(5):
+            app._add_motor()
+        app.root.deiconify()
+        app.root.update()
+        full_width = app.root.winfo_width()
+        for _ in range(2):
+            app._set_compact_view(True)
+            app.root.update()
+            self.assertTrue(app._compact_frame.winfo_ismapped())
+            self.assertFalse(app._full_console_frame.winfo_ismapped())
+            self.assertEqual(len(app._compact_widgets), 6)
+            self.assertLessEqual(app.root.winfo_width(), 400)
+            self.assertLessEqual(app.root.winfo_height(), 400)
+            self.assertTrue(app._compact_pause_all_btn.winfo_ismapped())
+            app._set_compact_view(False)
+            app.root.update()
+            self.assertTrue(app._full_console_frame.winfo_ismapped())
+            self.assertFalse(app._compact_frame.winfo_ismapped())
+            self.assertGreaterEqual(app.root.winfo_width(), full_width)
+
+    def test_compact_readouts_share_live_position_variables_and_pause_all(self):
+        app = self.app
+        app._add_motor()
+        app._set_compact_view(True)
+        app.motor_states[1].relative_zero_point = 3
+        app._on_position_update(2, 5.125)
+        readouts = app._compact_widgets[2]
+        self.assertEqual(app.root.getvar(readouts['absolute'].cget('textvariable')), '5.125')
+        self.assertEqual(app.root.getvar(readouts['relative'].cget('textvariable')), '2.125')
+        with patch.object(app.serial_manager, 'send', return_value=True) as send:
+            app._compact_pause_all_btn.invoke()
+            self.assertEqual(P.parse_response(send.call_args.args[0])[0], 'PAUSE_ALL')
+            send.reset_mock()
+            app._on_pause_shortcut(SimpleNamespace())
+            self.assertEqual(P.parse_response(send.call_args.args[0])[0], 'PAUSE_ALL')
+
+    def test_compact_view_blocks_run_and_jog_shortcuts_and_cancels_current_jog(self):
+        app = self.app
+        with self.jog_session() as send:
+            app._set_compact_view(True)
+            self.assertEqual(self.paused_ids(send), {1})
+            self.assertIsNone(app._active_step_key)
+            send.reset_mock()
+            app._on_keypress(SimpleNamespace(keysym='plus', widget=app.root))
+            send.assert_not_called()
+        required = 8 if app.root.tk.call('tk', 'windowingsystem') == 'aqua' else 4
+        with patch.object(app, '_on_run') as run:
+            app._select_mode(Config.MODE_TARGET)
+            app._on_run_shortcut(SimpleNamespace(state=required))
+            run.assert_not_called()
+        self.assertTrue(app._compact_active)
+
+    def test_compact_view_preserves_running_program_and_returns_to_its_mode(self):
+        app = self.app
+        app._select_mode(Config.MODE_PROGRAM)
+        state = app.motor_states[0]
+        state.instructions = [InstructionStep(1, .01), InstructionStep(2, .01)]
+        state.is_running = True
+        state.instruction_status = 'running'
+        with patch.object(type(app.serial_manager), 'is_connected', new_callable=PropertyMock, return_value=True), \
+                patch.object(app.serial_manager, 'send', return_value=True) as send:
+            app._set_compact_view(True)
+            self.assertTrue(state.is_running)
+            app._on_position_update(1, 1)
+            self.assertEqual(state.instruction_index, 1)
+            self.assertEqual(P.parse_response(send.call_args.args[0])[0], 'RUN')
+            self.assertEqual(app.root.getvar(app._compact_widgets[1]['absolute'].cget('textvariable')), '1.000')
+            app._set_compact_view(False)
+            self.assertEqual(app._mode_var.get(), Config.MODE_PROGRAM)
+            self.assertTrue(state.is_running)
+
+    def test_compact_view_persists_in_configs_and_automatic_restore(self):
+        app = self.app
+        app._set_compact_view(True)
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'compact.json'
+            write_config(path, app._workspace_snapshot())
+            saved = read_config(path)
+            self.assertTrue(saved['compact_view'])
+            app._set_compact_view(False)
+            app._apply_workspace(saved)
+            self.assertTrue(app._compact_active)
+            automatic = Path(folder) / 'automatic.json'
+            with patch.object(app, '_get_data_path', return_value=automatic):
+                self.patches[1].temp_original(app)
+                app._saved_compact_view = False
+                self.patches[0].temp_original(app)
+            self.assertTrue(app._saved_compact_view)
+
+    def test_compact_run_uses_visible_selection_and_existing_targets(self):
+        app = self.app
+        app._add_motor()
+        app._select_only_motor(1)
+        app._motor_widgets[1]['speed_var'].set('.01')
+        app._motor_widgets[1]['target_var'].set('5.125')
+        app._set_compact_view(True)
+        app._compact_widgets[1]['selection'].invoke()
+        app._compact_widgets[2]['selection'].invoke()
+        self.assertFalse(app.motor_states[0].is_selected)
+        self.assertTrue(app.motor_states[1].is_selected)
+        with patch.object(type(app.serial_manager), 'is_connected', new_callable=PropertyMock, return_value=True), \
+                patch.object(app.serial_manager, 'send', return_value=True) as send:
+            app._compact_run_btn.invoke()
+            name, args = P.parse_response(send.call_args.args[0])
+            self.assertEqual(name, 'RUN')
+            self.assertEqual(int(args[0]), 2)
+            self.assertEqual(float(args[2]), 5.125)
+        self.assertTrue(app._compact_active)
+
+    def test_compact_run_program_and_step_mode_state(self):
+        app = self.app
+        app._select_only_motor(1)
+        app.motor_states[0].instructions = [InstructionStep(3, .01)]
+        app._select_mode(Config.MODE_PROGRAM)
+        app._set_compact_view(True)
+        with patch.object(type(app.serial_manager), 'is_connected', new_callable=PropertyMock, return_value=True), \
+                patch.object(app.serial_manager, 'send', return_value=True) as send:
+            app._compact_run_btn.invoke()
+            self.assertEqual(float(P.parse_response(send.call_args.args[0])[1][2]), 3)
+            app._on_stop_all()
+            app._select_mode(Config.MODE_STEP)
+            send.reset_mock()
+            app._compact_run_btn.invoke()
+            send.assert_not_called()
+            self.assertTrue(app._compact_run_btn.instate(['disabled']))
+            app._select_mode(Config.MODE_TARGET)
+            self.assertFalse(app._compact_run_btn.instate(['disabled']))
+
+    def test_compact_run_cannot_be_activated_by_enter(self):
+        app = self.app
+        app._select_only_motor(1)
+        app._motor_widgets[0]['speed_var'].set('.01')
+        app._motor_widgets[0]['target_var'].set('5')
+        app._set_compact_view(True)
+        app.root.deiconify()
+        app._compact_run_btn.focus_force()
+        app.root.update()
+        with patch.object(type(app.serial_manager), 'is_connected', new_callable=PropertyMock, return_value=True), \
+                patch.object(app.serial_manager, 'send', return_value=True) as send:
+            for state in (0, 4, 8, 16):
+                app._compact_run_btn.event_generate('<KeyPress-Return>', state=state)
+                app._compact_run_btn.event_generate('<KeyRelease-Return>', state=state)
+                app.root.update()
+            send.assert_not_called()
+
     def test_positions_and_disconnect_update_gui(self):
         self.app._on_connect()
         self.pump_until(lambda: self.app._connect_btn.cget('text') == 'Disconnect')

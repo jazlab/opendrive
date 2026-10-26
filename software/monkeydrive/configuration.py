@@ -51,6 +51,8 @@ def validate_workspace(data):
     if mode not in (Config.MODE_TARGET, Config.MODE_STEP, Config.MODE_PROGRAM):
         raise ValueError('Unknown movement mode.')
     result['mode'] = mode
+    if 'compact_view' in data and type(data['compact_view']) is not bool:
+        raise ValueError('Compact view must be true or false.')
     for key in ('port', 'anatomy_path', 'anatomy_orientation_actual', 'anatomy_orientation_scanner'):
         result[key] = text(key)
     from .anatomy import AnatomyOrientation

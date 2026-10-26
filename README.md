@@ -81,6 +81,14 @@ software and firmware use an absolute travel range of **0–50 mm**.
 In Target and Program modes, **Ctrl+Enter** (Windows) or **Cmd+Enter** (macOS)
 also triggers **Run Selected**. Plain Enter only confirms field edits.
 
+Choose **View → Compact View** for a small position monitor with live absolute
+and relative readouts, drive selection, **Run Selected**, and **Pause All**.
+Run Selected uses the targets or program configured in the full console and is
+disabled in Step mode. Click **Expand** to return to the full console.
+The view choice is saved with the workspace. In Compact View, Run/jog
+shortcuts are disabled and **End** pauses all drives; existing movements and
+programs continue unless paused.
+
 **Pause All** is always available below the movement controls. It sends a
 controller-wide stop regardless of drive selection or displayed running status.
 In Step mode, holding **+ / −** jogs the original selected drives. Releasing the

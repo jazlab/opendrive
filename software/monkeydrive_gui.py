@@ -65,6 +65,9 @@ class MonkeyDriveApp:
         self._trajectory_summary_window: Optional[JsonViewerProcess] = None
         self._probe_summary_window: Optional[JsonViewerProcess] = None
         self._saved_mode: str = Config.MODE_TARGET
+        self._saved_compact_view = False
+        self._compact_active = False
+        self._full_console_size = None
         self._saved_port: str = ""
         self._saved_step_speed: float = Config.DEFAULT_STEP_SPEED
         self._saved_step_size: float = Config.DEFAULT_STEP_SIZE
@@ -133,6 +136,7 @@ class MonkeyDriveApp:
             self._rebuild_motor_rows()
 
         self._style_widget_tree()
+        self._set_compact_view(self._saved_compact_view, remember=False)
 
         # Keep the console usable with platform font and display scaling.
         self._fit_window_to_content()
@@ -220,6 +224,8 @@ class MonkeyDriveApp:
         style.configure("Pause.Console.TButton", foreground="#a52d36")
         style.configure("Selected.Console.TButton", background="#eaf1fa", foreground="#225da8")
         style.configure("Console.TLabel", font=self._console_font, background=Theme.COLOR_BG, foreground="#626e7d")
+        style.configure('Compact.Readout.TLabel', background=Theme.COLOR_BG, foreground=Theme.COLOR_FG,
+                        font=(self._console_font.actual('family'), 11, 'bold'))
         style.configure("Title.Console.TLabel", font=(self._console_font.actual("family"), 26, "bold"),
                         foreground=Theme.COLOR_FG)
 
@@ -293,10 +299,13 @@ class MonkeyDriveApp:
     def _fit_window_to_content(self):
         """Fit mode contents while preserving space the user has added."""
         self._root.update_idletasks()
-        width = max(980, self._root.winfo_reqwidth())
+        width = max(260 if self._compact_active else 980, self._root.winfo_reqwidth())
         height = self._root.winfo_reqheight()
         self._root.minsize(width, height)
-        self._root.geometry(f"{max(width, self._root.winfo_width())}x{max(height, self._root.winfo_height())}")
+        if self._compact_active:
+            self._root.geometry(f'{width}x{height}')
+        else:
+            self._root.geometry(f"{max(width, self._root.winfo_width())}x{max(height, self._root.winfo_height())}")
 
     def _build_ui(self):
         menu = tk.Menu(self._root)
@@ -304,8 +313,14 @@ class MonkeyDriveApp:
         self._config_menu.add_command(label='Save Config…', command=self._on_save_config)
         self._config_menu.add_command(label='Load Config…', command=self._on_load_config)
         menu.add_cascade(label='File', menu=self._config_menu)
+        self._compact_view_var = tk.BooleanVar(self._root, value=self._saved_compact_view)
+        view_menu = tk.Menu(menu, tearoff=False)
+        view_menu.add_checkbutton(label='Compact View', variable=self._compact_view_var,
+                                  command=self._set_compact_view)
+        menu.add_cascade(label='View', menu=view_menu)
         self._root.configure(menu=menu)
         main = tk.Frame(self._root, padx=24, pady=20)
+        self._full_console_frame = main
         main.pack(fill=tk.BOTH, expand=True)
         header = tk.Frame(main)
         header.pack(fill=tk.X, pady=(0, 22))
@@ -337,6 +352,80 @@ class MonkeyDriveApp:
         self._stop_all_btn = ttk.Button(pause_all_row, text='Pause All', command=self._on_stop_all,
                                         style='Pause.Console.TButton', width=13)
         self._stop_all_btn.pack(pady=(8, 4))
+        self._build_compact_view()
+
+    def _build_compact_view(self):
+        self._compact_frame = tk.Frame(self._root, padx=12, pady=10)
+        header = tk.Frame(self._compact_frame)
+        header.pack(fill=tk.X, pady=(0, 4))
+        tk.Label(header, text='MonkeyDrive', font=(self._console_font.actual('family'), 13, 'bold')).pack(side=tk.LEFT)
+        ttk.Button(header, text='Expand', command=lambda: self._set_compact_view(False),
+                   style='Console.TButton', width=7).pack(side=tk.RIGHT)
+        status = tk.Frame(self._compact_frame)
+        status.pack(fill=tk.X, pady=(0, 8))
+        ttk.Label(status, textvariable=self._connection_text, style='Console.TLabel').pack(side=tk.LEFT)
+        ttk.Label(status, textvariable=self._mode_var, style='Console.TLabel').pack(side=tk.RIGHT)
+        self._compact_table = tk.Frame(self._compact_frame)
+        self._compact_table.pack(fill=tk.BOTH, expand=True)
+        self._compact_widgets = {}
+        actions = tk.Frame(self._compact_frame)
+        actions.pack(fill=tk.X, pady=(10, 0))
+        self._compact_run_btn = ttk.Button(actions, text='Run Selected', command=self._on_run,
+            style='Primary.Console.TButton', state='disabled' if self._is_step_mode() else 'normal')
+        self._compact_run_btn.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4))
+        self._compact_run_btn.bind('<Return>', lambda _event: 'break')
+        self._compact_run_btn.bind('<KP_Enter>', lambda _event: 'break')
+        self._compact_run_btn.bind('<KeyRelease-Return>', lambda _event: 'break')
+        self._compact_run_btn.bind('<KeyRelease-KP_Enter>', lambda _event: 'break')
+        self._compact_pause_all_btn = ttk.Button(actions, text='Pause All',
+            command=self._on_stop_all, style='Pause.Console.TButton')
+        self._compact_pause_all_btn.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(4, 0))
+
+    def _rebuild_compact_rows(self):
+        for child in self._compact_table.winfo_children():
+            child.destroy()
+        self._compact_widgets.clear()
+        for column, label in enumerate(('Drive', 'Abs (mm)', 'Rel (mm)')):
+            ttk.Label(self._compact_table, text=label, style='Console.TLabel', anchor='center').grid(
+                row=0, column=column, sticky='ew', padx=5, pady=(0, 5))
+            self._compact_table.grid_columnconfigure(column, weight=1)
+        for row, (state, widgets) in enumerate(zip(self._motor_states, self._motor_widgets), 1):
+            selection = tk.Checkbutton(self._compact_table, text=str(state.motor_id),
+                variable=widgets['selected_var'], command=lambda mid=state.motor_id: self._on_selection_change(mid),
+                background=Theme.COLOR_BG, activebackground=Theme.COLOR_BG, selectcolor=Theme.COLOR_ENTRY_BG)
+            selection.grid(
+                row=row, column=0, sticky='ew', padx=5, pady=3)
+            values = {'selection': selection}
+            for column, name in enumerate(('absolute', 'relative'), 1):
+                label = ttk.Label(self._compact_table, textvariable=widgets[f'{name}_var'],
+                                  style='Compact.Readout.TLabel', anchor='center', width=8)
+                label.grid(row=row, column=column, sticky='ew', padx=5, pady=3)
+                values[name] = label
+            self._compact_widgets[state.motor_id] = values
+
+    def _set_compact_view(self, compact=None, remember=True):
+        compact = self._compact_view_var.get() if compact is None else bool(compact)
+        self._compact_view_var.set(compact)
+        if compact == self._compact_active:
+            return
+        self._reset_step_key_state()
+        if compact:
+            self._full_console_size = (self._root.winfo_width(), self._root.winfo_height())
+            if self._root.state() == 'zoomed':
+                self._root.state('normal')
+            self._full_console_frame.pack_forget()
+            self._compact_frame.pack(fill=tk.BOTH, expand=True)
+        else:
+            self._compact_frame.pack_forget()
+            self._full_console_frame.pack(fill=tk.BOTH, expand=True)
+        self._compact_active = compact
+        self._root.minsize(1, 1)
+        if not compact and self._full_console_size:
+            self._root.geometry(f'{self._full_console_size[0]}x{self._full_console_size[1]}')
+        self._fit_window_to_content()
+        self._root.focus_set()
+        if remember:
+            self._save_state()
 
     def _build_port_selection(self, parent):
         connection = tk.Frame(parent)
@@ -767,6 +856,7 @@ class MonkeyDriveApp:
             self._trajectory_summary_window.send({'type': 'motor_states',
                 'motor_states': [s.to_dict() for s in self._motor_states], 'revisions': dict(self._trajectory_revisions)})
         self._trajectory_roster = roster
+        self._rebuild_compact_rows()
         self._fit_window_to_content()
 
     def _visible_column_count(self) -> int:
@@ -815,6 +905,8 @@ class MonkeyDriveApp:
 
     def _update_mode_visibility(self):
         """Show controls for the selected movement mode."""
+        if hasattr(self, '_compact_run_btn'):
+            self._compact_run_btn.configure(state='disabled' if self._is_step_mode() else 'normal')
         if not (
             self._target_controls_frame
             and self._step_controls_frame
@@ -1035,7 +1127,7 @@ class MonkeyDriveApp:
 
     def _on_pause_shortcut(self, event):
         """Pause selected running motors from the End key."""
-        self._on_pause()
+        self._on_stop_all() if self._compact_active else self._on_pause()
         return "break"
 
     def _run_shortcuts(self):
@@ -1047,7 +1139,7 @@ class MonkeyDriveApp:
     def _on_run_shortcut(self, event):
         """Match Run Selected in Target/Program; Step mode has no Run action."""
         required_modifier = 0x0008 if self._root.tk.call('tk', 'windowingsystem') == 'aqua' else 0x0004
-        if event.state & required_modifier and not self._is_step_mode():
+        if event.state & required_modifier and not self._compact_active and not self._is_step_mode():
             self._on_run()
         return 'break'
 
@@ -1056,6 +1148,8 @@ class MonkeyDriveApp:
         key = 'down' if self._is_step_down_key(event) else 'up' if self._is_step_up_key(event) else None
         if key in self._blocked_step_keys:
             return self._handle_step_keypress(key, 1 if key == 'down' else -1)
+        if self._compact_active:
+            return None
         if not self._is_step_mode():
             return None
 
@@ -2649,6 +2743,7 @@ class MonkeyDriveApp:
             'hidden_motor_states': [s.to_dict() for s in self._hidden_motor_states.values()],
             'port': self._port_var.get() if self._port_var else self._saved_port,
             'mode': self._mode_var.get() if self._mode_var else self._saved_mode,
+            'compact_view': self._compact_view_var.get(),
             'step_speed': self._step_speed_var.get() if self._step_speed_var else f"{self._saved_step_speed:g}",
             'step_size': self._step_size_var.get() if self._step_size_var else format_mm(self._saved_step_size),
             'min_speed': self._min_speed,
@@ -2770,6 +2865,7 @@ class MonkeyDriveApp:
         self._step_targets.clear()
         self._motion_targets.clear()
         self._saved_mode, self._saved_port = data['mode'], data['port']
+        self._saved_compact_view = data.get('compact_view', False)
         self._saved_step_speed, self._saved_step_size = data['step_speed'], data['step_size']
         self._min_speed, self._max_speed, self._backlash = data['min_speed'], data['max_speed'], data['backlash']
         self._saved_anatomy_path = data['anatomy_path']
@@ -2783,6 +2879,7 @@ class MonkeyDriveApp:
         self._connect_btn.configure(text='Connect', state='normal')
         self._connection_text.set('Disconnected')
         self._select_mode(self._saved_mode)
+        self._set_compact_view(self._saved_compact_view, remember=False)
         self._refresh_trajectory_buttons()
         self._refresh_running_indicators()
         self._save_state()
@@ -2819,6 +2916,7 @@ class MonkeyDriveApp:
                 mode = data.get('mode', Config.MODE_TARGET)
                 valid_modes = (Config.MODE_TARGET, Config.MODE_STEP, Config.MODE_PROGRAM)
                 self._saved_mode = mode if mode in valid_modes else Config.MODE_TARGET
+                self._saved_compact_view = bool(data.get('compact_view', False))
                 self._saved_port = str(data.get('port', ""))
                 self._saved_step_speed = float(data.get('step_speed', Config.DEFAULT_STEP_SPEED))
                 self._saved_step_size = round(float(data.get('step_size', Config.DEFAULT_STEP_SIZE)), 3)
