@@ -19,7 +19,6 @@ namespace Config {
     
     constexpr unsigned long POSITION_UPDATE_INTERVAL_MS = 200;
     constexpr unsigned long HEARTBEAT_TIMEOUT_MS = 1000;
-    constexpr unsigned long HEARTBEAT_CHECK_INTERVAL_MS = 500;
     
     constexpr int MAX_MOTORS = 6;
     constexpr float STEP_ANGLE_DEG = 18.0f;
@@ -118,10 +117,17 @@ MotorState motors[Config::MAX_MOTORS];
 char serialBuffer[Config::SERIAL_BUFFER_SIZE];
 int serialBufferIndex = 0;
 unsigned long lastHeartbeatReceived = 0;
-bool heartbeatTimeoutOccurred = false;
+bool heartbeatReceived = false;
 float minSpeedMmS = Config::MIN_SPEED_MM_S;
 float maxSpeedMmS = Config::MAX_SPEED_MM_S;
 long backlashSteps = Config::DEFAULT_BACKLASH_STEPS;
+
+bool heartbeatIsFresh() {
+    // millis() wraps after ~49 days on Teensy. Unsigned elapsed time keeps
+    // the same timeout behavior across that wrap.
+    uint32_t elapsed = static_cast<uint32_t>(millis() - lastHeartbeatReceived);
+    return heartbeatReceived && elapsed <= Config::HEARTBEAT_TIMEOUT_MS;
+}
 
 // =============================================================================
 // Checksum Utilities
@@ -293,16 +299,31 @@ void stopMotor(int idx) {
 }
 
 void stopAllMotors() {
+    bool wasRunning[Config::MAX_MOTORS];
     for (int i = 0; i < Config::MAX_MOTORS; i++) {
+        wasRunning[i] = motors[i].isRunning;
         if (motors[i].isRunning) motors[i].lastDirection = motors[i].direction;
         motors[i].isRunning = false;
         motors[i].stepsRemaining = 0;
         motors[i].currentSpeed = 0.0f;
     }
     disableMotors();
+    // Disable every drive before serial output, which can be slow. Publish
+    // final positions once for the affected drives, not on every stale loop.
+    for (int i = 0; i < Config::MAX_MOTORS; i++) {
+        if (wasRunning[i]) sendPositionUpdate(i + 1);
+    }
+}
+
+void checkHeartbeat() {
+    if (!heartbeatIsFresh() && anyMotorRunning()) {
+        stopAllMotors();
+    }
 }
 
 void updateMotors() {
+    // Gate physical stepping every loop, independently of command parsing.
+    checkHeartbeat();
     unsigned long now = micros();
 
     for (int i = 0; i < Config::MAX_MOTORS; i++) {
@@ -392,9 +413,13 @@ void processCommand(const char* cmd) {
     char* token = strtok(data, ",");
     if (!token) return;
 
+    // A late heartbeat must stop an expired movement before renewing the
+    // lease. This also covers serial batches containing RUN then HEARTBEAT.
+    checkHeartbeat();
+
     if (strcmp(token, "HEARTBEAT") == 0) {
         lastHeartbeatReceived = millis();
-        heartbeatTimeoutOccurred = false;
+        heartbeatReceived = true;
         sendResponse("HEARTBEAT_ACK");
         return;
     }
@@ -443,6 +468,7 @@ void processCommand(const char* cmd) {
         if (!token) return;
         int id = atoi(token);
         if (id < 1 || id > Config::MAX_MOTORS) { sendError(id, "BadID"); return; }
+        if (!heartbeatIsFresh()) { sendError(id, "HeartbeatTimeout"); return; }
         token = strtok(NULL, ",");
         if (!token) return;
         updateTarget(id - 1, atof(token));
@@ -455,6 +481,7 @@ void processCommand(const char* cmd) {
         if (!token) return;
         int id = atoi(token);
         if (id < 1 || id > Config::MAX_MOTORS) { sendError(id, "BadID"); return; }
+        if (!heartbeatIsFresh()) { sendError(id, "HeartbeatTimeout"); return; }
 
         token = strtok(NULL, ",");
         if (!token) return;
@@ -509,15 +536,6 @@ void readSerial() {
     }
 }
 
-void checkHeartbeat() {
-    if (millis() - lastHeartbeatReceived > Config::HEARTBEAT_TIMEOUT_MS) {
-        if (!heartbeatTimeoutOccurred) {
-            stopAllMotors();
-            heartbeatTimeoutOccurred = true;
-        }
-    }
-}
-
 void sendPositionUpdates() {
     static unsigned long lastUpdate = 0;
     if (millis() - lastUpdate >= Config::POSITION_UPDATE_INTERVAL_MS) {
@@ -547,6 +565,7 @@ void setup() {
     }
     
     lastHeartbeatReceived = millis();
+    heartbeatReceived = false;
     sendResponse("READY");
 }
 
@@ -554,10 +573,4 @@ void loop() {
     readSerial();
     updateMotors();
     sendPositionUpdates();
-    
-    static unsigned long lastHBCheck = 0;
-    if (millis() - lastHBCheck >= Config::HEARTBEAT_CHECK_INTERVAL_MS) {
-        checkHeartbeat();
-        lastHBCheck = millis();
-    }
 }

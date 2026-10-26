@@ -24,10 +24,9 @@ def _preload_mri_dependencies():
     _import_numpy()
     try:
         import nibabel  # noqa: F401
-        import pydicom  # noqa: F401
     except ImportError as exc:
         raise AnatomyDependencyError(
-            "MRI support requires numpy, nibabel, and pydicom. "
+            "MRI support requires numpy and nibabel. "
             "Install the packages in software/requirements.txt."
         ) from exc
 

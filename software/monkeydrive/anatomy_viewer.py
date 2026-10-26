@@ -90,8 +90,6 @@ class AnatomyViewer(tk.Toplevel):
         toolbar.pack(fill=tk.X, pady=(0, 16))
 
         viewer_button(toolbar, text="Open NIfTI", command=self._open_nifti).pack(side=tk.LEFT, padx=(0, 6))
-        viewer_button(toolbar, text="Open DICOM File", command=self._open_dicom_file).pack(side=tk.LEFT, padx=(0, 6))
-        viewer_button(toolbar, text="Open DICOM Folder", command=self._open_dicom_folder).pack(side=tk.LEFT, padx=(0, 6))
         viewer_button(toolbar, text="Orientation", command=self._open_orientation_dialog).pack(side=tk.LEFT, padx=(0, 18))
 
         tk.Label(toolbar, text="Zoom:").pack(side=tk.LEFT, padx=(0, 6))
@@ -155,27 +153,9 @@ class AnatomyViewer(tk.Toplevel):
             parent=self,
             title="Open NIfTI anatomy",
             filetypes=[
-                ("NIfTI files", ("*.nii", "*.gz")),
-                ("All files", "*.*"),
+                ("NIfTI files", ("*.nii", "*.nii.gz")),
             ],
         )
-        if path:
-            self._load_path(path)
-
-    def _open_dicom_file(self):
-        path = filedialog.askopenfilename(
-            parent=self,
-            title="Open DICOM anatomy file",
-            filetypes=[
-                ("DICOM files", "*.dcm *.ima *"),
-                ("All files", "*.*"),
-            ],
-        )
-        if path:
-            self._load_path(path)
-
-    def _open_dicom_folder(self):
-        path = filedialog.askdirectory(parent=self, title="Open DICOM series folder")
         if path:
             self._load_path(path)
 

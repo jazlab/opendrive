@@ -16,7 +16,7 @@ hardware.
   microdrives, and the matching firmware. The firmware in this repository targets
   a Teensy 4.0.
 - **For anatomy and trajectory viewing:** your MRI data as a NIfTI file
-  (`.nii` or `.nii.gz`), a DICOM file, or a DICOM series folder.
+  (`.nii` or `.nii.gz`).
 
 MRI data is optional for motor control and is not included in the repository.
 
@@ -62,18 +62,30 @@ software and firmware use an absolute travel range of **0–50 mm**.
 1. Connect the control unit by USB. Choose its serial port in the upper-right
    dropdown and click **Connect**. Close other applications using that port,
    such as the Arduino Serial Monitor.
-2. Use **+ / −** above the drive rows to show the drives you need. Check the box
+2. Use **+ / −** above the drive rows to show the drives you need. Removing a row
+   pauses that drive and retains its positions, notes, program, and trajectory;
+   adding it back restores that state, including after restarting or loading a
+   config. Check the box
    beside each drive you intend to control; movement buttons apply to selected
    drives.
 3. Choose a movement mode:
 
    | Mode | Use it to | Basic controls |
    | --- | --- | --- |
-   | **Target** | Move to an absolute position | Enter a target in mm and speed in mm/s, then click **Run**. |
+   | **Target** | Move to an absolute position | Enter a target in mm and speed in mm/s, then click **Run Selected**. |
    | **Step** | Move by a fixed increment | Set the shared step size and speed, then click **Step Up** or **Step Down**. Up moves toward zero; Down moves away from zero. |
-   | **Program** | Run a sequence of movements | Edit a drive's instructions, select the drive, and click **Run**. Programs can be saved and loaded. |
+   | **Program** | Run a sequence of movements | Edit a drive's instructions, select the drive, and click **Run Selected**. Programs can be saved and loaded. |
 
-4. Click **Pause**, or press **End**, to pause selected running drives.
+4. Click **Pause Selected**, or press **End**, to pause selected running drives.
+
+In Target and Program modes, **Ctrl+Enter** (Windows) or **Cmd+Enter** (macOS)
+also triggers **Run Selected**. Plain Enter only confirms field edits.
+
+**Pause All** is always available below the movement controls. It sends a
+controller-wide stop regardless of drive selection or displayed running status.
+In Step mode, holding **+ / −** jogs the original selected drives. Releasing the
+key stops the jog; changing selection or mode, leaving the control window, or
+minimizing also cancels it. After a stop, release the key before starting again.
 
 Each drive shows **Running** while the app tracks a commanded movement.
 
@@ -92,8 +104,7 @@ and backlash compensation; check these against your hardware before moving.
 
 ## Anatomy and trajectory planning
 
-Start with **Anatomy** in the main window. Load your MRI using the NIfTI or DICOM
-controls, then inspect the sagittal, coronal, and axial slices. Scroll over a view
+Start with **Anatomy** in the main window. Click **Open NIfTI** to load your MRI, then inspect the sagittal, coronal, and axial slices. Scroll over a view
 to change slices, and adjust zoom and contrast as needed. Verify anatomical
 orientation before planning a trajectory.
 
@@ -119,6 +130,17 @@ MonkeyDrive automatically saves its workspace and settings to
 last anatomy path. MRI files stay in their original location. The state file is
 local to your checkout and is excluded from Git.
 
+Use **File → Save Config…** to save a named JSON configuration, and **File →
+Load Config…** to restore it later. Configurations include drive positions and
+relative zero points, programs, notes, trajectories, Explorer settings, controller
+settings, and the anatomy path and orientation. MRI data is referenced at its
+existing location rather than copied into the config.
+
+Loading replaces the current workspace and disconnects the controller first.
+It does not move motors or resume programs. Open Anatomy and Trajectories windows
+are refreshed with the loaded configuration. Automatic startup restore continues
+to use the latest workspace, including any config you load.
+
 Saved positions are not a substitute for checking the physical drive position
 after reconnecting or restarting hardware. Use **Export** to save a CSV snapshot
 of the drive data.
@@ -130,6 +152,11 @@ If your controller is not already programmed, the firmware is in
 Open it in the Arduino IDE with Teensy support, select the matching board and
 port, and upload it. Confirm the pin assignments and motor configuration match
 your control unit before use.
+
+The firmware requires a valid heartbeat before accepting movement commands.
+After more than one second without one, it stops motion before issuing further
+step pulses and rejects new movement commands until heartbeats return. A returning
+heartbeat does not resume the interrupted movement; a new Run command is required.
 
 The desktop entry point is
 [`software/monkeydrive_gui.py`](software/monkeydrive_gui.py); supporting modules

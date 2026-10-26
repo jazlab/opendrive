@@ -30,6 +30,7 @@ logger = logging.getLogger(__name__)
 
 
 from monkeydrive.config import Config
+from monkeydrive.configuration import atomic_write_json, read_config, write_config
 from monkeydrive.console_theme import ConsoleTheme as Theme
 from monkeydrive.dialogs import InstructionsWindow, NotesWindow, ProgramLoadWindow, SettingsWindow
 from monkeydrive.models import InstructionStep, MotorState, TrajectoryState
@@ -37,6 +38,7 @@ from monkeydrive.protocol import SerialProtocol
 from monkeydrive.serial_manager import SerialManager
 from monkeydrive.utils import format_mm
 from monkeydrive.viewer_process import JsonViewerProcess
+from monkeydrive.viewer_tasks import LatestWorker
 
 
 # =============================================================================
@@ -54,6 +56,7 @@ class MonkeyDriveApp:
 
         # State
         self._motor_states: list = []
+        self._hidden_motor_states: dict[int, MotorState] = {}
         self._motor_widgets: list = []
         self._notes_windows: dict = {}
         self._trajectory_windows: dict = {}
@@ -77,10 +80,18 @@ class MonkeyDriveApp:
         self._motion_targets: dict[int, float] = {}
         self._active_step_key: Optional[str] = None
         self._active_step_direction: int = 0
+        self._step_key_motor_ids = ()
+        self._blocked_step_keys = set()
+        self._step_unblock_jobs = {}
+        self._focus_check_job = None
         self._step_key_is_jogging: bool = False
         self._step_key_hold_job = None
         self._step_key_release_job = None
         self._closing = False
+        self._config_worker = None
+        self._config_busy = False
+        self._config_loading = False
+        self._config_load_job = None
 
         # Serial manager
         self._serial_manager = SerialManager(
@@ -288,6 +299,12 @@ class MonkeyDriveApp:
         self._root.geometry(f"{max(width, self._root.winfo_width())}x{max(height, self._root.winfo_height())}")
 
     def _build_ui(self):
+        menu = tk.Menu(self._root)
+        self._config_menu = tk.Menu(menu, tearoff=False)
+        self._config_menu.add_command(label='Save Config…', command=self._on_save_config)
+        self._config_menu.add_command(label='Load Config…', command=self._on_load_config)
+        menu.add_cascade(label='File', menu=self._config_menu)
+        self._root.configure(menu=menu)
         main = tk.Frame(self._root, padx=24, pady=20)
         main.pack(fill=tk.BOTH, expand=True)
         header = tk.Frame(main)
@@ -312,7 +329,14 @@ class MonkeyDriveApp:
         footer = tk.Frame(main)
         footer.pack(fill=tk.X)
         self._selection_text = tk.StringVar(value="")
-        self._build_control_buttons(footer)
+        actions = tk.Frame(footer)
+        actions.pack(fill=tk.X)
+        self._build_control_buttons(actions)
+        pause_all_row = tk.Frame(footer)
+        pause_all_row.pack(fill=tk.X)
+        self._stop_all_btn = ttk.Button(pause_all_row, text='Pause All', command=self._on_stop_all,
+                                        style='Pause.Console.TButton', width=13)
+        self._stop_all_btn.pack(pady=(8, 4))
 
     def _build_port_selection(self, parent):
         connection = tk.Frame(parent)
@@ -399,7 +423,7 @@ class MonkeyDriveApp:
 
         self._add_action_group(
             self._target_controls_frame,
-            [("Run", self._on_run), ("Pause", self._on_pause), ("Zero Selected", self._on_zero)],
+            [("Run Selected", self._on_run), ("Pause Selected", self._on_pause), ("Zero Selected", self._on_zero)],
             width=10,
         )
         self._add_action_group(
@@ -417,7 +441,7 @@ class MonkeyDriveApp:
             [
                 ("Step Up", lambda: self._on_step(direction=-1)),
                 ("Step Down", lambda: self._on_step(direction=1)),
-                ("Pause", self._on_pause),
+                ("Pause Selected", self._on_pause),
                 ("Zero Selected", self._on_zero),
             ],
             width=11,
@@ -435,8 +459,8 @@ class MonkeyDriveApp:
         self._add_action_group(
             self._program_controls_frame,
             [
-                ("Run", self._on_run),
-                ("Pause", self._on_pause),
+                ("Run Selected", self._on_run),
+                ("Pause Selected", self._on_pause),
                 ("Zero Selected", self._on_zero),
                 ("Reset", self._on_reset_program),
             ],
@@ -464,8 +488,18 @@ class MonkeyDriveApp:
         group.pack(side=tk.LEFT, padx=padx)
         for text, command in buttons:
             button = ttk.Button(group, text=text, command=command, width=max(width, len(text)),
-                                style="Primary.Console.TButton" if text in ("Run", "Step Up", "Step Down")
-                                else "Pause.Console.TButton" if text == "Pause" else "Console.TButton")
+                                style="Primary.Console.TButton" if text in ("Run Selected", "Step Up", "Step Down")
+                                else "Pause.Console.TButton" if text == "Pause Selected" else "Console.TButton")
+            if text in ('Run Selected', 'Step Up', 'Step Down'):
+                # Some Tk platforms activate a focused button on Enter.
+                # Plain Enter confirms fields; only the explicit modifier
+                # shortcut may start movement.
+                button.bind('<Return>', lambda _event: 'break')
+                button.bind('<KP_Enter>', lambda _event: 'break')
+                for shortcut in self._run_shortcuts():
+                    button.bind(shortcut, self._on_run_shortcut)
+                button.bind('<KeyRelease-Return>', lambda _event: 'break')
+                button.bind('<KeyRelease-KP_Enter>', lambda _event: 'break')
             button.pack(side=tk.LEFT, padx=2)
 
     def _build_header_row(self):
@@ -773,6 +807,7 @@ class MonkeyDriveApp:
 
     def _on_mode_change(self):
         """Handle switching between movement modes."""
+        self._reset_step_key_state()
         self._refresh_mode_buttons()
         self._update_mode_visibility()
         self._rebuild_motor_rows()
@@ -978,29 +1013,49 @@ class MonkeyDriveApp:
         """Bind global keyboard shortcuts for movement commands."""
         self._root.bind_all('<KeyPress>', self._on_keypress)
         self._root.bind_all('<KeyRelease>', self._on_keyrelease)
-        self._root.bind_all('<Command-Return>', self._on_run_shortcut)
-        self._root.bind_all('<Command-KP_Enter>', self._on_run_shortcut)
-        self._root.bind_all('<Control-Return>', self._on_run_shortcut)
-        self._root.bind_all('<Control-KP_Enter>', self._on_run_shortcut)
+        for shortcut in self._run_shortcuts():
+            self._root.bind(shortcut, self._on_run_shortcut)
         self._root.bind_all('<End>', self._on_pause_shortcut)
+        self._root.bind('<FocusOut>', self._on_jog_focus_out, add='+')
+        self._root.bind('<Unmap>', self._on_jog_unmap, add='+')
 
-    def _on_run_shortcut(self, event):
-        """Run selected motors in target mode from Command/Ctrl+Enter."""
-        widget = self._event_widget(event)
-        if widget and widget.winfo_toplevel() != self._root:
-            return None
-        if self._is_step_mode() or self._is_program_mode():
-            return None
-        self._on_run()
-        return "break"
+    def _on_jog_focus_out(self, _event):
+        if self._focus_check_job is None and not self._closing:
+            self._focus_check_job = self._root.after_idle(self._check_jog_focus)
+
+    def _check_jog_focus(self):
+        self._focus_check_job = None
+        focus = self._root.focus_get()
+        if focus is None or focus.winfo_toplevel() != self._root or self._is_editable_text_widget(focus):
+            self._reset_step_key_state()
+
+    def _on_jog_unmap(self, event):
+        if event.widget == self._root:
+            self._reset_step_key_state()
 
     def _on_pause_shortcut(self, event):
         """Pause selected running motors from the End key."""
         self._on_pause()
         return "break"
 
+    def _run_shortcuts(self):
+        # Command is a macOS modifier. Its Tk alias on other platforms can
+        # overlap unrelated modifier states (for example keyboard lock keys).
+        modifier = 'Command' if self._root.tk.call('tk', 'windowingsystem') == 'aqua' else 'Control'
+        return (f'<{modifier}-Return>', f'<{modifier}-KP_Enter>')
+
+    def _on_run_shortcut(self, event):
+        """Match Run Selected in Target/Program; Step mode has no Run action."""
+        required_modifier = 0x0008 if self._root.tk.call('tk', 'windowingsystem') == 'aqua' else 0x0004
+        if event.state & required_modifier and not self._is_step_mode():
+            self._on_run()
+        return 'break'
+
     def _on_keypress(self, event):
         """Handle step-mode keyboard shortcuts."""
+        key = 'down' if self._is_step_down_key(event) else 'up' if self._is_step_up_key(event) else None
+        if key in self._blocked_step_keys:
+            return self._handle_step_keypress(key, 1 if key == 'down' else -1)
         if not self._is_step_mode():
             return None
 
@@ -1026,14 +1081,18 @@ class MonkeyDriveApp:
 
     def _on_keyrelease(self, event):
         """Stop step-mode jog motion when a step shortcut key is released."""
-        if not self._is_step_mode():
-            return None
-
-        widget = self._event_widget(event)
-        if widget and widget.winfo_toplevel() != self._root:
-            return None
-
-        if widget and self._is_editable_text_widget(widget):
+        key = 'down' if self._is_step_down_key(event) else 'up' if self._is_step_up_key(event) else None
+        if key in self._blocked_step_keys:
+            previous = self._step_unblock_jobs.pop(key, None)
+            if previous is not None:
+                self._root.after_cancel(previous)
+            def unblock():
+                self._step_unblock_jobs.pop(key, None)
+                self._blocked_step_keys.discard(key)
+            self._step_unblock_jobs[key] = self._root.after(Config.STEP_KEY_RELEASE_DEBOUNCE_MS, unblock)
+            return 'break'
+        # The release belongs to the original gesture, even if focus changed.
+        if not self._active_step_key:
             return None
 
         if self._is_step_down_key(event):
@@ -1046,6 +1105,11 @@ class MonkeyDriveApp:
 
     def _handle_step_keypress(self, key_name: str, direction: int):
         """Handle initial step shortcut press and ignore key-repeat repeats."""
+        if key_name in self._blocked_step_keys:
+            pending = self._step_unblock_jobs.pop(key_name, None)
+            if pending is not None:
+                self._root.after_cancel(pending)
+            return 'break'
         self._cancel_step_key_release_job()
 
         if self._active_step_key == key_name:
@@ -1054,6 +1118,7 @@ class MonkeyDriveApp:
         self._reset_step_key_state()
         self._active_step_key = key_name
         self._active_step_direction = direction
+        self._step_key_motor_ids = tuple(state.motor_id for state in self._selected_states())
         self._on_step(direction=direction)
         self._step_key_hold_job = self._root.after(
             Config.STEP_JOG_HOLD_DELAY_MS, self._start_step_jog
@@ -1076,21 +1141,27 @@ class MonkeyDriveApp:
         self._step_key_release_job = None
         self._cancel_step_key_hold_job()
         if self._step_key_is_jogging:
-            self._pause_selected_step_motors()
+            self._pause_motors(self._step_key_motor_ids)
         self._active_step_key = None
         self._active_step_direction = 0
         self._step_key_is_jogging = False
+        self._step_key_motor_ids = ()
 
     def _start_step_jog(self):
         """Convert a held step shortcut into continuous jog motion."""
         self._step_key_hold_job = None
         if not self._active_step_key or self._active_step_direction == 0:
             return
+        if self._step_key_release_job is not None:
+            # Do not enter continuous motion while a release is being debounced.
+            # A repeat press can cancel the release and this retry can then jog.
+            self._step_key_hold_job = self._root.after(Config.STEP_KEY_RELEASE_DEBOUNCE_MS, self._start_step_jog)
+            return
 
         if not self._serial_manager.is_connected:
             return
 
-        selected = self._selected_states()
+        selected = [self._get_state(mid) for mid in self._step_key_motor_ids if self._get_state(mid)]
         if not selected or not self._validate_absolute_edits_closed(selected):
             return
 
@@ -1107,7 +1178,6 @@ class MonkeyDriveApp:
             state.is_running = self._queue_motion(state, cmd)
 
         self._step_key_is_jogging = True
-        self._focus_main_window()
 
     def _cancel_step_key_release_job(self):
         """Cancel a pending jog stop."""
@@ -1129,26 +1199,30 @@ class MonkeyDriveApp:
         """Return True for keys that trigger Step Up."""
         return event.keysym in ('KP_Subtract', 'minus', 'underscore')
 
-    def _pause_selected_step_motors(self):
-        """Pause selected motors after releasing a step shortcut."""
-        if not self._serial_manager.is_connected:
-            return
-
-        for state in self._selected_states():
-            if state.is_running:
-                self._serial_manager.send(SerialProtocol.cmd_pause(state.motor_id))
+    def _pause_motors(self, motor_ids):
+        """Stop explicit IDs independently of selection or running flags."""
+        for motor_id in set(motor_ids):
+            self._serial_manager.send(SerialProtocol.cmd_pause(motor_id))
+            state = self._get_state(motor_id) or self._hidden_motor_states.get(motor_id)
+            if state:
                 state.is_running = False
-            self._step_targets.pop(state.motor_id, None)
-
-        self._focus_main_window()
+                if state.instruction_status == 'running':
+                    state.instruction_status = 'paused'
+                    self._update_program_row(motor_id)
+            self._step_targets.pop(motor_id, None)
+            self._motion_targets.pop(motor_id, None)
 
     def _reset_step_key_state(self):
         """Clear step shortcut repeat state."""
+        if self._active_step_key:
+            self._blocked_step_keys.add(self._active_step_key)
         self._cancel_step_key_release_job()
         self._cancel_step_key_hold_job()
+        self._pause_motors(self._step_key_motor_ids)
         self._active_step_key = None
         self._active_step_direction = 0
         self._step_key_is_jogging = False
+        self._step_key_motor_ids = ()
 
     def _event_widget(self, event):
         """Return the Tk widget object for an event."""
@@ -1161,6 +1235,8 @@ class MonkeyDriveApp:
 
     def _focus_main_window(self):
         """Return keyboard focus to the main application window."""
+        if self._active_step_key:
+            return
         self._root.after_idle(self._root.focus_force)
 
     def _is_editable_text_widget(self, widget) -> bool:
@@ -1189,12 +1265,15 @@ class MonkeyDriveApp:
         """Select one motor and deselect all others."""
         if motor_id < 1 or motor_id > len(self._motor_states):
             return
+        if self._step_key_motor_ids and self._step_key_motor_ids != (motor_id,):
+            self._reset_step_key_state()
 
         for state in self._motor_states:
             state.is_selected = (state.motor_id == motor_id)
             widgets = self._get_widgets(state.motor_id)
             if widgets:
                 widgets['selected_var'].set(state.is_selected)
+                self._apply_row_selection_style(widgets, state.is_selected)
 
     def _enable_step_setting_edit(self, setting: str):
         """Enable editing for a step setting field."""
@@ -1400,7 +1479,7 @@ class MonkeyDriveApp:
             status = "Connected" if self._serial_manager.is_connected else "Connecting / disconnecting" if self._serial_manager.is_busy else "Disconnected"
             if self._connection_text.get() != status:
                 self._connection_text.set(status)
-            if not self._serial_manager.is_busy and not self._serial_manager.is_connected:
+            if not self._config_loading and not self._serial_manager.is_busy and not self._serial_manager.is_connected:
                 self._connect_btn.config(text="Connect", state="normal")
         except Exception:
             logger.exception("Serial event handling failed; stopping connection")
@@ -1523,6 +1602,7 @@ class MonkeyDriveApp:
 
     def _on_selection_change(self, motor_id: int):
         """Handle motor selection checkbox change."""
+        self._reset_step_key_state()
         state = self._get_state(motor_id)
         widgets = self._get_widgets(motor_id)
         if state and widgets:
@@ -1871,6 +1951,8 @@ class MonkeyDriveApp:
 
     def _on_connect(self):
         """Handle connect/disconnect button click."""
+        if self._config_loading and not self._serial_manager.is_connected:
+            return
         port = self._port_var.get()
         if not port:
             messagebox.showwarning("No Port", "Please select a port.")
@@ -1940,23 +2022,27 @@ class MonkeyDriveApp:
             return
 
         motor_id = len(self._motor_states) + 1
-        state = MotorState(motor_id=motor_id)
+        state = self._hidden_motor_states.pop(motor_id, None) or MotorState(motor_id=motor_id)
         self._motor_states.append(state)
 
         self._rebuild_motor_rows()
 
     def _remove_motor(self):
-        """Remove the last motor row."""
+        """Hide the last drive, retaining its calibration and configuration."""
         if len(self._motor_states) <= 1:
             return
 
         last_state = self._motor_states[-1]
-        if last_state.is_running:
-            self._serial_manager.send(SerialProtocol.cmd_pause(last_state.motor_id))
-        self._step_targets.pop(last_state.motor_id, None)
+        self._reset_step_key_state()
+        self._pause_motors([last_state.motor_id])
+        if last_state.motor_id in self._notes_windows:
+            self._notes_windows[last_state.motor_id]._on_close()
+        last_state.is_selected = False
+        self._hidden_motor_states[last_state.motor_id] = last_state
 
         self._motor_states.pop()
         self._rebuild_motor_rows()
+        self._save_state()
 
     # -------------------------------------------------------------------------
     # Control Actions
@@ -2161,14 +2247,20 @@ class MonkeyDriveApp:
     def _on_pause(self):
         """Handle Pause button click."""
         self._reset_step_key_state()
-        selected = [s for s in self._motor_states if s.is_selected and s.is_running]
-        for state in selected:
-            self._serial_manager.send(SerialProtocol.cmd_pause(state.motor_id))
+        self._pause_motors(state.motor_id for state in self._selected_states())
+
+    def _on_stop_all(self):
+        """Stop every controller drive, regardless of selection or GUI flags."""
+        self._serial_manager.send(SerialProtocol.cmd_pause_all())
+        self._reset_step_key_state()
+        for state in [*self._motor_states, *self._hidden_motor_states.values()]:
             state.is_running = False
-            if state.instruction_status == "running":
-                state.instruction_status = "paused"
+            if state.instruction_status == 'running':
+                state.instruction_status = 'paused'
                 self._update_program_row(state.motor_id)
-            self._step_targets.pop(state.motor_id, None)
+        self._motion_targets.clear()
+        self._step_targets.clear()
+        self._refresh_running_indicators()
 
     def _on_zero(self):
         """Zero relative position for selected motors."""
@@ -2424,7 +2516,7 @@ class MonkeyDriveApp:
 
     def _on_position_update(self, motor_id: int, absolute: float):
         """Apply a queued position update on the Tk thread."""
-        state = self._get_state(motor_id)
+        state = self._get_state(motor_id) or self._hidden_motor_states.get(motor_id)
         if state:
             target = self._motion_targets.get(motor_id)
             if target is not None and abs(absolute - target) < 0.0005:
@@ -2546,25 +2638,158 @@ class MonkeyDriveApp:
     def _save_state(self):
         """Save current state to JSON file."""
         try:
-            data = {
-                'motor_states': [s.to_dict() for s in self._motor_states],
-                'port': self._port_var.get() if self._port_var else self._saved_port,
-                'mode': self._mode_var.get() if self._mode_var else self._saved_mode,
-                'step_speed': self._step_speed_var.get() if self._step_speed_var else f"{self._saved_step_speed:g}",
-                'step_size': self._step_size_var.get() if self._step_size_var else format_mm(self._saved_step_size),
-                'min_speed': self._min_speed,
-                'max_speed': self._max_speed,
-                'backlash': round(self._backlash, 3),
-                'anatomy_path': self._saved_anatomy_path,
-                'explorer_state': self._explorer_state,
-                'anatomy_orientation_actual': self._anatomy_orientation_actual,
-                'anatomy_orientation_scanner': self._anatomy_orientation_scanner,
-                'recent_programs': self._recent_programs[:10],
-            }
-            with open(self._get_data_path(), 'w', encoding='utf-8') as f:
-                json.dump(data, f, indent=2)
-        except IOError as e:
+            atomic_write_json(self._get_data_path(), self._workspace_snapshot())
+        except (OSError, ValueError, TypeError) as e:
             logger.error("Failed to save state: %s", e)
+
+    def _workspace_snapshot(self):
+        """Shared contents for automatic restore and named configurations."""
+        data = {
+            'motor_states': [s.to_dict() for s in self._motor_states],
+            'hidden_motor_states': [s.to_dict() for s in self._hidden_motor_states.values()],
+            'port': self._port_var.get() if self._port_var else self._saved_port,
+            'mode': self._mode_var.get() if self._mode_var else self._saved_mode,
+            'step_speed': self._step_speed_var.get() if self._step_speed_var else f"{self._saved_step_speed:g}",
+            'step_size': self._step_size_var.get() if self._step_size_var else format_mm(self._saved_step_size),
+            'min_speed': self._min_speed,
+            'max_speed': self._max_speed,
+            'backlash': round(self._backlash, 3),
+            'anatomy_path': self._saved_anatomy_path,
+            'explorer_state': dict(self._explorer_state),
+            'anatomy_orientation_actual': self._anatomy_orientation_actual,
+            'anatomy_orientation_scanner': self._anatomy_orientation_scanner,
+            'recent_programs': self._recent_programs[:10],
+        }
+        # Notes editors save on close; a config also includes their current text.
+        for motor_id, window in self._notes_windows.items():
+            if window.winfo_exists() and 1 <= motor_id <= len(data['motor_states']):
+                data['motor_states'][motor_id - 1]['notes'] = window._text.get('1.0', 'end-1c').strip()
+        return data
+
+    def _set_config_busy(self, busy):
+        self._config_busy = busy
+        for index in (0, 1):
+            self._config_menu.entryconfigure(index, state='disabled' if busy else 'normal')
+
+    def _config_task(self, compute, complete):
+        if self._config_worker is None:
+            self._config_worker = LatestWorker(self._root)
+        self._set_config_busy(True)
+        self._config_worker.submit('config', compute, complete)
+
+    def _on_save_config(self):
+        if self._config_busy:
+            return
+        self._reset_step_key_state()
+        path = self._safe_popup(
+            filedialog.asksaveasfilename, 'Save Config', parent=self._root,
+            defaultextension='.json', filetypes=[('MonkeyDrive config', '*.json')],
+            initialfile=f'monkeydrive_config_{datetime.now():%Y%m%d_%H%M%S}.json')
+        if not path:
+            return
+        self._poll_viewer_processes()
+        snapshot = self._workspace_snapshot()
+        if snapshot['anatomy_path']:
+            snapshot['anatomy_path'] = str(Path(snapshot['anatomy_path']).resolve())
+
+        def complete(_result, error):
+            self._set_config_busy(False)
+            if error:
+                self._safe_popup(messagebox.showerror, 'Save Config Failed', str(error), parent=self._root)
+            else:
+                self._safe_popup(messagebox.showinfo, 'Config Saved', f'Saved config to:\n{path}', parent=self._root)
+        self._config_task(lambda: write_config(path, snapshot), complete)
+
+    def _on_load_config(self):
+        if self._config_busy:
+            return
+        self._reset_step_key_state()
+        path = self._safe_popup(
+            filedialog.askopenfilename, 'Load Config', parent=self._root,
+            filetypes=[('MonkeyDrive config', '*.json')])
+        if not path:
+            return
+        self._config_loading = True
+
+        def complete(workspace, error):
+            if error:
+                self._config_loading = False
+                self._set_config_busy(False)
+                self._safe_popup(messagebox.showerror, 'Load Config Failed', str(error), parent=self._root)
+                return
+            # Disconnect clears queued positions and commands; do not allow a
+            # late hardware update to overwrite restored coordinates.
+            self._reset_step_key_state()
+            self._serial_manager.disconnect()
+            self._connect_btn.configure(text='Disconnecting...', state='disabled')
+            self._finish_config_load(workspace)
+        self._config_task(lambda: read_config(path), complete)
+
+    def _finish_config_load(self, workspace):
+        self._config_load_job = None
+        if self._closing:
+            return
+        if self._serial_manager.is_busy:
+            self._config_load_job = self._root.after(20, lambda: self._finish_config_load(workspace))
+            return
+        self._apply_workspace(workspace)
+        self._config_loading = False
+        self._set_config_busy(False)
+        message = 'Configuration loaded. The controller is disconnected; no movement was started.'
+        if self._saved_anatomy_path and not self._has_loaded_anatomy():
+            message += '\n\nThe MRI could not be found at its saved location. Open Anatomy to select the file or folder again.'
+        self._safe_popup(messagebox.showinfo, 'Config Loaded', message, parent=self._root)
+
+    def _apply_workspace(self, data):
+        """Apply already-validated state only after the serial worker has closed."""
+        reopen_anatomy = bool(self._anatomy_window and self._anatomy_window.is_running())
+        reopen_trajectories = bool(self._trajectory_summary_window and self._trajectory_summary_window.is_running())
+        # Detach old handles before replacing state, so queued viewer edits
+        # cannot leak from the previous workspace into the new one.
+        viewers = [self._anatomy_window, self._trajectory_summary_window, self._probe_summary_window,
+                   *self._trajectory_windows.values()]
+        self._anatomy_window = self._trajectory_summary_window = self._probe_summary_window = None
+        self._trajectory_windows.clear()
+        for window in viewers:
+            if window:
+                window.close()
+        for window in self._notes_windows.values():
+            window.destroy()
+        self._notes_windows.clear()
+        if self._settings_window:
+            self._settings_window.destroy()
+            self._settings_window = None
+        for row in self._motor_widgets:
+            for widget in row['all_widgets']:
+                widget.unbind('<FocusOut>')
+        self._motor_states = [MotorState.from_dict(item) for item in data['motor_states']]
+        self._hidden_motor_states = {item['motor_id']: MotorState.from_dict(item)
+                                     for item in data.get('hidden_motor_states', [])}
+        self._trajectory_revisions.clear()
+        self._trajectory_roster = ()
+        self._step_targets.clear()
+        self._motion_targets.clear()
+        self._saved_mode, self._saved_port = data['mode'], data['port']
+        self._saved_step_speed, self._saved_step_size = data['step_speed'], data['step_size']
+        self._min_speed, self._max_speed, self._backlash = data['min_speed'], data['max_speed'], data['backlash']
+        self._saved_anatomy_path = data['anatomy_path']
+        self._explorer_state = data['explorer_state']
+        self._anatomy_orientation_actual = data['anatomy_orientation_actual']
+        self._anatomy_orientation_scanner = data['anatomy_orientation_scanner']
+        self._recent_programs = data['recent_programs']
+        self._port_var.set(self._saved_port)
+        self._step_speed_var.set(f'{self._saved_step_speed:g}')
+        self._step_size_var.set(format_mm(self._saved_step_size))
+        self._connect_btn.configure(text='Connect', state='normal')
+        self._connection_text.set('Disconnected')
+        self._select_mode(self._saved_mode)
+        self._refresh_trajectory_buttons()
+        self._refresh_running_indicators()
+        self._save_state()
+        if reopen_anatomy:
+            self._on_anatomy()
+        if reopen_trajectories and self._has_loaded_anatomy():
+            self._on_trajectory_summary()
 
     def _load_state(self):
         """Load state from JSON file."""
@@ -2577,8 +2802,12 @@ class MonkeyDriveApp:
                 self._motor_states = [
                     MotorState.from_dict(s) for s in data.get('motor_states', [])
                 ]
+                self._hidden_motor_states = {
+                    item['motor_id']: MotorState.from_dict(item)
+                    for item in data.get('hidden_motor_states', [])
+                }
 
-                for state in self._motor_states:
+                for state in [*self._motor_states, *self._hidden_motor_states.values()]:
                     state.is_running = False
                     if state.instruction_status == "running":
                         state.instruction_status = "paused"
@@ -2643,6 +2872,11 @@ class MonkeyDriveApp:
         if self._closing:
             return
         self._closing = True
+        if self._config_worker:
+            self._config_worker.close()
+        if self._config_load_job is not None:
+            self._root.after_cancel(self._config_load_job)
+            self._config_load_job = None
         self._reset_step_key_state()
         self._serial_manager.disconnect()
         self._shutdown_deadline = time.monotonic() + Config.SERIAL_SHUTDOWN_TIMEOUT

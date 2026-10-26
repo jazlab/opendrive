@@ -17,7 +17,7 @@ def _import_numpy():
         import numpy as np
     except ImportError as exc:
         raise AnatomyDependencyError(
-            "MRI support requires numpy, nibabel, and pydicom. "
+            "MRI support requires numpy and nibabel. "
             "Install the packages in software/requirements.txt."
         ) from exc
     return np
@@ -231,16 +231,16 @@ class AnatomyLoader:
 
     @staticmethod
     def load(path: str | Path) -> AnatomyVolume:
-        """Load a NIfTI file, DICOM file, or DICOM directory."""
+        """Load supported NIfTI anatomy; reject other formats explicitly."""
         source = Path(path)
         if source.is_dir():
-            return AnatomyLoader.load_dicom_directory(source)
+            raise ValueError('Open a NIfTI file (.nii or .nii.gz), not a folder.')
 
         lower_name = source.name.lower()
         if lower_name.endswith(AnatomyLoader.NIFTI_SUFFIXES):
             return AnatomyLoader.load_nifti(source)
 
-        return AnatomyLoader.load_dicom_file(source)
+        raise ValueError('Only NIfTI anatomy (.nii or .nii.gz) is supported.')
 
     @staticmethod
     def load_nifti(path: Path) -> AnatomyVolume:
@@ -273,64 +273,6 @@ class AnatomyLoader:
         )
 
     @staticmethod
-    def load_dicom_file(path: Path) -> AnatomyVolume:
-        """Load a single DICOM image."""
-        return AnatomyLoader._load_dicom_paths([path], path)
-
-    @staticmethod
-    def load_dicom_directory(path: Path) -> AnatomyVolume:
-        """Load a DICOM series from a directory."""
-        dicom_paths = [p for p in path.iterdir() if p.is_file()]
-        return AnatomyLoader._load_dicom_paths(dicom_paths, path)
-
-    @staticmethod
-    def _load_dicom_paths(paths: list[Path], source_path: Path) -> AnatomyVolume:
-        np = _import_numpy()
-        try:
-            import pydicom
-        except ImportError as exc:
-            raise AnatomyDependencyError(
-                "DICOM support requires pydicom. Install software/requirements.txt."
-            ) from exc
-
-        slices = []
-        for path in paths:
-            try:
-                dataset = pydicom.dcmread(str(path), force=True)
-                if not hasattr(dataset, "PixelData"):
-                    continue
-                slices.append(dataset)
-            except Exception:
-                continue
-
-        if not slices:
-            raise ValueError(f"No readable DICOM image slices found in {source_path}")
-
-        slices.sort(key=AnatomyLoader._dicom_sort_key)
-
-        arrays = []
-        for dataset in slices:
-            array = dataset.pixel_array.astype(np.float32)
-            slope = float(getattr(dataset, "RescaleSlope", 1.0))
-            intercept = float(getattr(dataset, "RescaleIntercept", 0.0))
-            arrays.append((array * slope) + intercept)
-
-        if len(arrays) == 1:
-            data = AnatomyLoader._ensure_3d(arrays[0])
-        else:
-            data = np.stack(arrays, axis=2)
-
-        voxel_sizes = AnatomyLoader._dicom_voxel_sizes(slices)
-        return AnatomyVolume(
-            data=data,
-            source_path=source_path,
-            source_type="DICOM",
-            affine=None,
-            voxel_sizes=voxel_sizes,
-            orientation_codes=None,
-        )
-
-    @staticmethod
     def _ensure_3d(data):
         np = _import_numpy()
         data = np.squeeze(data)
@@ -342,39 +284,6 @@ class AnatomyLoader:
             return data[:, :, :, 0]
         raise ValueError(f"Expected a 2D/3D MRI volume, got shape {data.shape}")
 
-    @staticmethod
-    def _dicom_sort_key(dataset) -> tuple:
-        image_position = getattr(dataset, "ImagePositionPatient", None)
-        if image_position is not None and len(image_position) >= 3:
-            return (0, float(image_position[2]))
-
-        instance = getattr(dataset, "InstanceNumber", None)
-        if instance is not None:
-            return (1, int(instance))
-
-        return (2, str(getattr(dataset, "SOPInstanceUID", "")))
-
-    @staticmethod
-    def _dicom_voxel_sizes(slices: list) -> Optional[tuple]:
-        first = slices[0]
-        pixel_spacing = getattr(first, "PixelSpacing", None)
-        if pixel_spacing is None or len(pixel_spacing) < 2:
-            return None
-
-        row_spacing = float(pixel_spacing[0])
-        col_spacing = float(pixel_spacing[1])
-
-        if len(slices) > 1:
-            first_pos = getattr(slices[0], "ImagePositionPatient", None)
-            second_pos = getattr(slices[1], "ImagePositionPatient", None)
-            if first_pos is not None and second_pos is not None:
-                slice_spacing = abs(float(second_pos[2]) - float(first_pos[2]))
-            else:
-                slice_spacing = float(getattr(first, "SliceThickness", 1.0))
-        else:
-            slice_spacing = float(getattr(first, "SliceThickness", 1.0))
-
-        return (row_spacing, col_spacing, slice_spacing)
 
 
 class AnatomySliceRenderer:
