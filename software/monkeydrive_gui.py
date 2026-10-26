@@ -57,6 +57,8 @@ class MonkeyDriveApp:
         self._motor_widgets: list = []
         self._notes_windows: dict = {}
         self._trajectory_windows: dict = {}
+        self._trajectory_revisions: dict[int, int] = {}
+        self._trajectory_roster = ()
         self._trajectory_summary_window: Optional[JsonViewerProcess] = None
         self._probe_summary_window: Optional[JsonViewerProcess] = None
         self._saved_mode: str = Config.MODE_TARGET
@@ -64,6 +66,7 @@ class MonkeyDriveApp:
         self._saved_step_speed: float = Config.DEFAULT_STEP_SPEED
         self._saved_step_size: float = Config.DEFAULT_STEP_SIZE
         self._saved_anatomy_path: str = ""
+        self._explorer_state: dict = {}
         self._anatomy_orientation_actual: str = ""
         self._anatomy_orientation_scanner: str = ""
         self._recent_programs: list[str] = []
@@ -71,6 +74,7 @@ class MonkeyDriveApp:
         self._max_speed: float = Config.MAX_SPEED
         self._backlash: float = Config.DEFAULT_BACKLASH_MM
         self._step_targets: dict = {}
+        self._motion_targets: dict[int, float] = {}
         self._active_step_key: Optional[str] = None
         self._active_step_direction: int = 0
         self._step_key_is_jogging: bool = False
@@ -216,7 +220,7 @@ class MonkeyDriveApp:
             if isinstance(widget, (tk.Tk, tk.Toplevel, tk.Frame)):
                 widget.configure(background=Theme.COLOR_BG)
             elif isinstance(widget, tk.Label):
-                if getattr(widget, "_monkeydrive_role", "") != "mode_tab":
+                if getattr(widget, "_monkeydrive_role", "") not in ("mode_tab", "motion_status"):
                     widget.configure(background=Theme.COLOR_BG, foreground=Theme.COLOR_FG)
             elif isinstance(widget, tk.Checkbutton):
                 widget.configure(
@@ -308,10 +312,7 @@ class MonkeyDriveApp:
         footer = tk.Frame(main)
         footer.pack(fill=tk.X)
         self._selection_text = tk.StringVar(value="")
-        ttk.Label(footer, textvariable=self._selection_text, style="Console.TLabel").pack(anchor="w", pady=(0, 10))
         self._build_control_buttons(footer)
-        ttk.Label(main, text="Positions in mm  /  Double-click a position or note to edit",
-                  style="Console.TLabel").pack(anchor="w", pady=(4, 0))
 
     def _build_port_selection(self, parent):
         connection = tk.Frame(parent)
@@ -398,7 +399,7 @@ class MonkeyDriveApp:
 
         self._add_action_group(
             self._target_controls_frame,
-            [("Run", self._on_run), ("Pause", self._on_pause), ("Zero", self._on_zero)],
+            [("Run", self._on_run), ("Pause", self._on_pause), ("Zero Selected", self._on_zero)],
             width=10,
         )
         self._add_action_group(
@@ -417,7 +418,7 @@ class MonkeyDriveApp:
                 ("Step Up", lambda: self._on_step(direction=-1)),
                 ("Step Down", lambda: self._on_step(direction=1)),
                 ("Pause", self._on_pause),
-                ("Zero", self._on_zero),
+                ("Zero Selected", self._on_zero),
             ],
             width=11,
         )
@@ -436,7 +437,7 @@ class MonkeyDriveApp:
             [
                 ("Run", self._on_run),
                 ("Pause", self._on_pause),
-                ("Zero", self._on_zero),
+                ("Zero Selected", self._on_zero),
                 ("Reset", self._on_reset_program),
             ],
             width=10,
@@ -462,7 +463,7 @@ class MonkeyDriveApp:
         group = tk.Frame(parent)
         group.pack(side=tk.LEFT, padx=padx)
         for text, command in buttons:
-            button = ttk.Button(group, text=text, command=command, width=width,
+            button = ttk.Button(group, text=text, command=command, width=max(width, len(text)),
                                 style="Primary.Console.TButton" if text in ("Run", "Step Up", "Step Down")
                                 else "Pause.Console.TButton" if text == "Pause" else "Console.TButton")
             button.pack(side=tk.LEFT, padx=2)
@@ -545,12 +546,11 @@ class MonkeyDriveApp:
         )
         widgets['checkbox'].pack(side=tk.LEFT)
 
-        widgets['trajectory_button'] = ttk.Button(
-            id_frame, text="Trajectory", style="Console.TButton",
-            command=lambda mid=state.motor_id: self._on_trajectory_click(mid),
-            state=tk.NORMAL if self._has_loaded_anatomy() else tk.DISABLED
-        )
-        widgets['trajectory_button'].pack(side=tk.LEFT, padx=(4, 0))
+        widgets['motion_status'] = tk.Label(id_frame, text="Idle", width=10, anchor="center",
+                                            font=(self._console_font.actual("family"), 11, "bold"),
+                                            foreground="#626e7d", background=Theme.COLOR_BG)
+        widgets['motion_status']._monkeydrive_role = "motion_status"
+        widgets['motion_status'].pack(side=tk.LEFT, padx=(8, 0))
 
         visible_widgets = [stripe, id_frame]
 
@@ -676,6 +676,11 @@ class MonkeyDriveApp:
         widgets['notes_entry'].grid(row=row_index, column=notes_col, sticky='ew', padx=5, pady=10)
         widgets['notes_entry'].bind('<Double-Button-1>', lambda e, mid=state.motor_id: self._on_notes_click(mid))
 
+        widgets['zero_button'] = ttk.Button(
+            self._motors_container, text='Zero', width=7, style='Console.TButton',
+            command=lambda mid=state.motor_id: self._zero_motor(mid))
+        widgets['zero_button'].grid(row=row_index, column=notes_col + 1, padx=5, pady=10)
+
         widgets["absolute_entry"].configure(font=self._readout_font, justify="center")
         widgets["relative_entry"].configure(justify="center")
         for key in ("speed_entry", "target_entry"):
@@ -684,7 +689,7 @@ class MonkeyDriveApp:
 
         # Store references to widgets for cleanup
         visible_widgets.extend([
-            widgets['absolute_entry'], widgets['relative_entry'], widgets['notes_entry']
+            widgets['absolute_entry'], widgets['relative_entry'], widgets['notes_entry'], widgets['zero_button']
         ])
         widgets['all_widgets'] = visible_widgets
         self._apply_row_selection_style(widgets, state.is_selected)
@@ -723,6 +728,11 @@ class MonkeyDriveApp:
         self._style_widget_tree(self._motors_container)
         for state, widgets in zip(self._motor_states, self._motor_widgets):
             self._apply_row_selection_style(widgets, state.is_selected)
+        roster = tuple(s.motor_id for s in self._motor_states)
+        if self._trajectory_summary_window and roster != self._trajectory_roster:
+            self._trajectory_summary_window.send({'type': 'motor_states',
+                'motor_states': [s.to_dict() for s in self._motor_states], 'revisions': dict(self._trajectory_revisions)})
+        self._trajectory_roster = roster
         self._fit_window_to_content()
 
     def _visible_column_count(self) -> int:
@@ -856,7 +866,7 @@ class MonkeyDriveApp:
             except tk.TclError:
                 pass
 
-        for key in ('motor_label', 'checkbox'):
+        for key in ('motor_label', 'checkbox', 'motion_status'):
             widget = widgets.get(key)
             if widget:
                 try:
@@ -1094,7 +1104,7 @@ class MonkeyDriveApp:
         for state in selected:
             self._step_targets[state.motor_id] = target
             cmd = SerialProtocol.cmd_run(state.motor_id, speed, target, state.absolute)
-            state.is_running = self._serial_manager.send(cmd)
+            state.is_running = self._queue_motion(state, cmd)
 
         self._step_key_is_jogging = True
         self._focus_main_window()
@@ -1335,7 +1345,9 @@ class MonkeyDriveApp:
 
     def _on_anatomy_path_change(self, path: str):
         """Save the most recently loaded anatomy path."""
-        if path != self._saved_anatomy_path:
+        changed = path != self._saved_anatomy_path
+        self._saved_anatomy_path = path
+        if changed:
             self._anatomy_orientation_actual = ""
             self._anatomy_orientation_scanner = ""
             self._send_anatomy_orientation_to_viewers()
@@ -1354,6 +1366,7 @@ class MonkeyDriveApp:
         """Notify open trajectory windows that anatomy orientation changed."""
         message = {
             "type": "anatomy_orientation",
+            "path": self._saved_anatomy_path,
             "actual": self._anatomy_orientation_actual,
             "scanner": self._anatomy_orientation_scanner,
         }
@@ -1377,17 +1390,13 @@ class MonkeyDriveApp:
         state = tk.NORMAL if self._has_loaded_anatomy() else tk.DISABLED
         if self._trajectory_summary_btn:
             self._trajectory_summary_btn.configure(state=state)
-        for widgets in self._motor_widgets:
-            button = widgets.get('trajectory_button')
-            if button:
-                button.configure(state=state)
-
     def _poll_serial_events(self):
         """Only this Tk callback renews the controller's GUI responsiveness lease."""
         if self._closing:
             return
         try:
             self._serial_manager.poll_events()
+            self._refresh_running_indicators()
             status = "Connected" if self._serial_manager.is_connected else "Connecting / disconnecting" if self._serial_manager.is_busy else "Disconnected"
             if self._connection_text.get() != status:
                 self._connection_text.set(status)
@@ -1436,6 +1445,8 @@ class MonkeyDriveApp:
             for event in handle.poll_events():
                 event_type = event.get("type")
                 if event_type == "save":
+                    if event.get('revision', 0) != self._trajectory_revisions.get(motor_id, 0):
+                        continue
                     trajectory = TrajectoryState.from_dict(event.get("trajectory", {}))
                     self._on_trajectory_save(motor_id, trajectory)
                 elif event_type == "pause_requested":
@@ -1449,14 +1460,25 @@ class MonkeyDriveApp:
                     )
 
         if self._trajectory_summary_window:
-            for event in self._trajectory_summary_window.poll_events():
-                event_type = event.get("type")
-                if event_type == "pause_requested":
+            workspace = self._trajectory_summary_window
+            for event in workspace.poll_events():
+                event_type = event.get('type')
+                motor_id = event.get('motor_id')
+                if event_type == 'save':
+                    if event.get('revision', 0) == self._trajectory_revisions.get(motor_id, 0):
+                        self._on_trajectory_save(motor_id, TrajectoryState.from_dict(event.get('trajectory', {})))
+                elif event_type == 'explorer_state':
+                    self._explorer_state = event.get('state', {})
+                elif event_type == 'assign_trajectory':
+                    success = self._assign_explorer_trajectory(motor_id, event.get('state', {}))
+                    workspace.send({'type': 'assignment_result',
+                        'message': f'Assigned to Drive {motor_id}' if success else 'Could not assign: check the drive and trajectory.'})
+                elif event_type == 'pause_requested':
                     self._on_pause()
-                elif event_type in ("closed", "exited"):
+                elif event_type in ('closed', 'exited'):
                     self._trajectory_summary_window = None
-                elif event_type == "error":
-                    logger.error("Trajectory summary error: %s", event.get("message"))
+                elif event_type == 'error':
+                    logger.error('Trajectories viewer error: %s', event.get('message'))
 
         if self._probe_summary_window:
             for event in self._probe_summary_window.poll_events():
@@ -1692,41 +1714,14 @@ class MonkeyDriveApp:
         self._save_state()
 
     def _on_trajectory_click(self, motor_id: int):
-        """Open the trajectory viewer for one motor."""
-        state = self._get_state(motor_id)
-        if not state:
-            return
-
-        if motor_id in self._trajectory_windows:
-            handle = self._trajectory_windows[motor_id]
-            if handle.is_running():
-                handle.send_focus()
-                return
-            self._trajectory_windows.pop(motor_id, None)
-
-        if not self._saved_anatomy_path:
-            messagebox.showinfo(
-                "No Anatomy Loaded",
-                "Open the Anatomy Viewer and load an MRI before defining trajectories."
-            )
-            return
-
-        handle = JsonViewerProcess(
-            "monkeydrive.trajectory_process",
-            [
-                "--motor-id", str(motor_id),
-                "--motor-position", f"{state.absolute:g}",
-                "--anatomy-path", self._saved_anatomy_path,
-                "--trajectory-json", json.dumps(state.trajectory.to_dict()),
-                "--orientation-actual", self._anatomy_orientation_actual,
-                "--orientation-scanner", self._anatomy_orientation_scanner,
-            ],
-            cwd=Path(__file__).parent,
-        )
-        self._trajectory_windows[motor_id] = handle
+        """Select one drive in the unified Trajectories window."""
+        if self._get_state(motor_id):
+            self._on_trajectory_summary()
+            if self._trajectory_summary_window:
+                self._trajectory_summary_window.send({'type': 'select_drive', 'motor_id': motor_id})
 
     def _on_trajectory_summary(self):
-        """Open the trajectory summary viewer."""
+        """Open Explorer, Summary, and drive tabs in one Trajectories window."""
         if self._trajectory_summary_window and self._trajectory_summary_window.is_running():
             self._trajectory_summary_window.send_focus()
             return
@@ -1740,10 +1735,12 @@ class MonkeyDriveApp:
             return
 
         handle = JsonViewerProcess(
-            "monkeydrive.trajectory_summary_process",
+            "monkeydrive.trajectories_process",
             [
                 "--anatomy-path", self._saved_anatomy_path,
                 "--motor-states-json", json.dumps([state.to_dict() for state in self._motor_states]),
+                "--explorer-json", json.dumps(self._explorer_state),
+                "--revisions-json", json.dumps(self._trajectory_revisions),
                 "--orientation-actual", self._anatomy_orientation_actual,
                 "--orientation-scanner", self._anatomy_orientation_scanner,
             ],
@@ -1761,6 +1758,35 @@ class MonkeyDriveApp:
             [],
             cwd=Path(__file__).parent,
         )
+
+    def _assign_explorer_trajectory(self, motor_id: int, parameters: dict) -> bool:
+        """Assign display geometry only; never issue a motor command."""
+        state = self._get_state(motor_id) if isinstance(motor_id, int) else None
+        if state is None:
+            return False
+        keys = ('x', 'y', 'z', 'ap_rotation', 'ml_rotation', 'twist_rotation', 'zoom')
+        try:
+            geometry = {key: float(parameters[key]) for key in keys}
+        except (KeyError, TypeError, ValueError):
+            return False
+        if not all(math.isfinite(value) for value in geometry.values()):
+            return False
+        if not .5 <= geometry['zoom'] <= 10 or any(abs(geometry[key]) > 180 for key in keys[3:6]):
+            return False
+        data = state.trajectory.to_dict()
+        data.update(geometry)
+        state.trajectory = TrajectoryState.from_dict(data)
+        revision = self._trajectory_revisions.get(motor_id, 0) + 1
+        self._trajectory_revisions[motor_id] = revision
+        viewer = self._trajectory_windows.get(motor_id)
+        if viewer and viewer.is_running():
+            viewer.send({'type': 'trajectory_state', 'trajectory': data, 'revision': revision})
+        if self._trajectory_summary_window:
+            self._trajectory_summary_window.send({'type': 'trajectory_state', 'motor_id': motor_id,
+                'trajectory': data, 'revision': revision, 'select': True})
+        self._update_trajectory_summary_motor_state(state)
+        self._save_state()
+        return True
 
     def _on_trajectory_save(self, motor_id: int, trajectory):
         """Save trajectory parameters for one motor."""
@@ -1936,6 +1962,33 @@ class MonkeyDriveApp:
     # Control Actions
     # -------------------------------------------------------------------------
 
+    def _queue_motion(self, state: MotorState, command: str) -> bool:
+        """Track accepted RUN destinations for display, not hardware acknowledgement."""
+        accepted = self._serial_manager.send(command)
+        if accepted:
+            _name, args = SerialProtocol.parse_response(command)
+            target = float(args[2])
+            if abs(target - state.absolute) >= 0.0005:
+                self._motion_targets[state.motor_id] = target
+            else:
+                self._motion_targets.pop(state.motor_id, None)
+        else:
+            self._motion_targets.pop(state.motor_id, None)
+        return accepted
+
+    def _refresh_running_indicators(self):
+        """Refresh changed badges on the existing Tk timer without changing motion state."""
+        connected = self._serial_manager.is_connected
+        for state, widgets in zip(self._motor_states, self._motor_widgets):
+            if not connected or not state.is_running:
+                self._motion_targets.pop(state.motor_id, None)
+            running = state.motor_id in self._motion_targets
+            if widgets.get('motion_status_running') != running:
+                widgets['motion_status'].configure(
+                    text="Running" if running else "Idle",
+                    foreground="#15734a" if running else "#626e7d")
+                widgets['motion_status_running'] = running
+
     def _on_run(self):
         """Handle Run button click."""
         if not self._serial_manager.is_connected:
@@ -2013,7 +2066,7 @@ class MonkeyDriveApp:
             cmd = SerialProtocol.cmd_run(
                 state.motor_id, state.speed, state.target, state.absolute
             )
-            state.is_running = self._serial_manager.send(cmd)
+            state.is_running = self._queue_motion(state, cmd)
 
     def _run_program_instructions(self, selected: list[MotorState]):
         """Run or continue selected motors' active instructions."""
@@ -2062,7 +2115,7 @@ class MonkeyDriveApp:
             cmd = SerialProtocol.cmd_run(
                 state.motor_id, state.speed, state.target, state.absolute
             )
-            state.is_running = self._serial_manager.send(cmd)
+            state.is_running = self._queue_motion(state, cmd)
             state.instruction_status = "running" if state.is_running else "paused"
             self._update_program_row(state.motor_id)
 
@@ -2101,7 +2154,7 @@ class MonkeyDriveApp:
         for state, target in target_updates:
             self._step_targets[state.motor_id] = target
             cmd = SerialProtocol.cmd_run(state.motor_id, speed, target, state.absolute)
-            state.is_running = self._serial_manager.send(cmd)
+            state.is_running = self._queue_motion(state, cmd)
 
         self._focus_main_window()
 
@@ -2119,15 +2172,20 @@ class MonkeyDriveApp:
 
     def _on_zero(self):
         """Zero relative position for selected motors."""
-        selected = [s for s in self._motor_states if s.is_selected]
+        for state in self._motor_states:
+            if state.is_selected:
+                self._zero_motor(state.motor_id)
 
-        for state in selected:
-            state.relative_zero_point = state.absolute
-            state.relative = 0.0
-
-            widgets = self._get_widgets(state.motor_id)
-            if widgets:
-                widgets['relative_var'].set("0.000")
+    def _zero_motor(self, motor_id: int):
+        """Set this drive's relative origin without changing its absolute position."""
+        state = self._get_state(motor_id)
+        if state is None:
+            return
+        state.relative_zero_point = state.absolute
+        state.relative = 0.0
+        widgets = self._get_widgets(motor_id)
+        if widgets:
+            widgets['relative_var'].set("0.000")
 
     def _on_export(self):
         """Export data to CSV file."""
@@ -2368,6 +2426,9 @@ class MonkeyDriveApp:
         """Apply a queued position update on the Tk thread."""
         state = self._get_state(motor_id)
         if state:
+            target = self._motion_targets.get(motor_id)
+            if target is not None and abs(absolute - target) < 0.0005:
+                self._motion_targets.pop(motor_id, None)
             state.absolute = round(absolute, 3)
             state.relative = round(state.absolute - state.relative_zero_point, 3)
             if not state.is_running:
@@ -2419,7 +2480,7 @@ class MonkeyDriveApp:
             state.target,
             state.absolute,
         )
-        state.is_running = self._serial_manager.send(cmd)
+        state.is_running = self._queue_motion(state, cmd)
         if not state.is_running:
             state.instruction_status = "paused"
             self._update_program_row(state.motor_id)
@@ -2467,6 +2528,7 @@ class MonkeyDriveApp:
                 window.send({
                     "type": "motor_state",
                     "motor_state": state.to_dict(),
+                    "revision": self._trajectory_revisions.get(state.motor_id, 0),
                 })
             else:
                 self._trajectory_summary_window = None
@@ -2494,6 +2556,7 @@ class MonkeyDriveApp:
                 'max_speed': self._max_speed,
                 'backlash': round(self._backlash, 3),
                 'anatomy_path': self._saved_anatomy_path,
+                'explorer_state': self._explorer_state,
                 'anatomy_orientation_actual': self._anatomy_orientation_actual,
                 'anatomy_orientation_scanner': self._anatomy_orientation_scanner,
                 'recent_programs': self._recent_programs[:10],
@@ -2534,6 +2597,8 @@ class MonkeyDriveApp:
                 self._max_speed = float(data.get('max_speed', Config.MAX_SPEED))
                 self._backlash = round(float(data.get('backlash', Config.DEFAULT_BACKLASH_MM)), 3)
                 self._saved_anatomy_path = str(data.get('anatomy_path', ""))
+                explorer = data.get('explorer_state', {})
+                self._explorer_state = explorer if isinstance(explorer, dict) else {}
                 self._anatomy_orientation_actual = str(data.get('anatomy_orientation_actual', ""))
                 self._anatomy_orientation_scanner = str(data.get('anatomy_orientation_scanner', ""))
                 recent_programs = data.get('recent_programs', [])

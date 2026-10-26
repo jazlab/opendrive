@@ -5,6 +5,7 @@ pyserial>=3.5
 
 # MRI/anatomy loading
 numpy>=1.24
+scipy>=1.10
 nibabel>=5.0
 pydicom>=2.4
 Pillow>=10.0

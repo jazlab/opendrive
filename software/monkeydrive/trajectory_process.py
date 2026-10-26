@@ -26,11 +26,12 @@ def _preload_mri_dependencies():
     """Import MRI libraries before starting subprocess helper threads."""
     _import_numpy()
     try:
+        import scipy.ndimage  # noqa: F401
         import nibabel  # noqa: F401
         import pydicom  # noqa: F401
     except ImportError as exc:
         raise AnatomyDependencyError(
-            "MRI support requires numpy, nibabel, and pydicom. "
+            "MRI support requires numpy, scipy, nibabel, and pydicom. "
             "Install the packages in software/requirements.txt."
         ) from exc
 
@@ -39,6 +40,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--motor-id", type=int, required=True)
     parser.add_argument("--motor-position", type=float, required=True)
+    parser.add_argument("--revision", type=int, default=0)
     parser.add_argument("--anatomy-path", required=True)
     parser.add_argument("--trajectory-json", required=True)
     parser.add_argument("--orientation-actual", default="")
@@ -66,12 +68,14 @@ def main() -> int:
     root.withdraw()
     viewer = None
     closed = False
+    revision = args.revision
 
     def on_save(motor_id: int, trajectory: TrajectoryState):
         _emit({
             "type": "save",
             "motor_id": motor_id,
             "trajectory": trajectory.to_dict(),
+            "revision": revision,
         })
 
     def close():
@@ -101,6 +105,7 @@ def main() -> int:
         root.bind_all("<End>", lambda _event: (_emit({"type": "pause_requested"}), "break")[1])
 
         def poll_commands():
+            nonlocal revision
             for _ in range(16):
                 try:
                     command = commands.get_nowait()
@@ -115,6 +120,9 @@ def main() -> int:
                     viewer.update_motor_position(float(command.get("position", 0.0)))
                 elif command_type == "target_offset":
                     viewer.update_target_offset(float(command.get("target_offset", 0.0)))
+                elif command_type == "trajectory_state":
+                    revision = int(command['revision'])
+                    viewer.update_trajectory(TrajectoryState.from_dict(command['trajectory']))
                 elif command_type == "anatomy_orientation":
                     viewer.update_anatomy_orientation(
                         str(command.get("actual", "")),

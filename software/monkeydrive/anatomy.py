@@ -467,37 +467,9 @@ class AnatomySliceRenderer:
         zoom: float = 1.0,
     ) -> bytes:
         """Sample an oblique MRI slice in world coordinates and return PPM bytes."""
-        np = _import_numpy()
-        horizontal = AnatomySliceRenderer._unit_vector(horizontal_world)
-        vertical = AnatomySliceRenderer._unit_vector(vertical_world)
-
-        width_mm = max(float(width_mm), 1.0)
-        height_mm = max(float(height_mm), 1.0)
-        zoom = max(0.25, min(float(zoom), 10.0))
-        largest = max(width_mm, height_mm)
-        width_px = max(1, int((width_mm / largest) * max_size * zoom))
-        height_px = max(1, int((height_mm / largest) * max_size * zoom))
-
-        xs = np.linspace(-width_mm / 2.0, width_mm / 2.0, width_px, dtype=np.float32)
-        ys = np.linspace(height_mm / 2.0, -height_mm / 2.0, height_px, dtype=np.float32)
-        grid_x, grid_y = np.meshgrid(xs, ys)
-
-        center = np.asarray(center_world, dtype=np.float32)
-        world = (
-            center[:, np.newaxis, np.newaxis]
-            + np.asarray(horizontal, dtype=np.float32)[:, np.newaxis, np.newaxis] * grid_x
-            + np.asarray(vertical, dtype=np.float32)[:, np.newaxis, np.newaxis] * grid_y
-        )
-
-        if volume.affine is None:
-            voxel = world
-        else:
-            inverse = np.linalg.inv(np.asarray(volume.affine, dtype=float))
-            flat_world = world.reshape(3, -1)
-            flat_world = np.vstack([flat_world, np.ones(flat_world.shape[1])])
-            voxel = (inverse @ flat_world)[:3].reshape(world.shape)
-
-        image = AnatomySliceRenderer._trilinear_sample(volume.data, voxel)
+        from .reslice import ObliqueReslicer
+        image = ObliqueReslicer(volume).sample(center_world, horizontal_world, vertical_world,
+                                               width_mm, height_mm, max_size=max_size, zoom=zoom)
         image = AnatomySliceRenderer._contrast_to_uint8(image, contrast_low, contrast_high)
         return AnatomySliceRenderer._uint8_to_ppm(image)
 

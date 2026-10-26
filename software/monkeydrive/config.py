@@ -62,8 +62,8 @@ class Config:
 
     # Column Weights and Min Sizes for Grid Layout
     # Col 0: Buttons/ID | Col 1: Speed | Col 2: Target | Col 3: Abs | Col 4: Rel | Col 5: Notes
-    COL_MIN_WIDTHS: tuple = (205, 100, 100, 100, 100, 150)
-    STEP_COL_MIN_WIDTHS: tuple = (205, 120, 120, 150)
-    PROGRAM_COL_MIN_WIDTHS: tuple = (205, 140, 80, 100, 100, 100, 100, 150)
+    COL_MIN_WIDTHS: tuple = (205, 100, 100, 100, 100, 150, 80)
+    STEP_COL_MIN_WIDTHS: tuple = (205, 120, 120, 150, 80)
+    PROGRAM_COL_MIN_WIDTHS: tuple = (205, 140, 80, 100, 100, 100, 100, 150, 80)
     ROW_PAD_Y: int = 2
     HEADER_PAD_Y: tuple = (5, 10)

@@ -121,6 +121,25 @@ class ViewerIntegrationTests(unittest.TestCase):
             self.wait_for(lambda: self.detail._image_refs[0].width() > old_width)
             self.assertEqual(render.call_count, 0)
 
+    def test_z_updates_detail_and_summary_and_survives_field_editing(self):
+        trajectory = TrajectoryState.from_dict(self.state.trajectory.to_dict())
+        trajectory.z = 7.25
+        self.detail.update_trajectory(trajectory)
+        self.assertEqual(self.detail._z_var.get(), '7.25')
+        self.assertEqual(self.detail._trajectory_origin(), (0, 0, 7.25))
+        self.detail._x_var.set('1.5')
+        self.assertTrue(self.detail._apply_fields())
+        self.assertEqual(self.detail._trajectory.z, 7.25)
+        self.state.trajectory = self.detail._trajectory
+        self.summary.update_motor_state(self.state)
+        np.testing.assert_allclose(self.summary._slice_geometry(1, self.state.trajectory)[0], [1.5, 0, 7.25])
+        self.assertEqual(TrajectoryState.from_dict({}).z, 0)
+        self.assertEqual(TrajectoryState.from_dict(trajectory.to_dict()).z, 7.25)
+        self.detail._z_var.set('nan')
+        with patch('monkeydrive.trajectory_viewer.messagebox.showwarning'):
+            self.assertFalse(self.detail._apply_fields())
+        self.assertEqual(self.detail._trajectory.z, 7.25)
+
     def test_anatomy_loading_is_background_work(self):
         entered, release = threading.Event(), threading.Event()
         anatomy = AnatomyViewer(self.root)

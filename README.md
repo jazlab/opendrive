@@ -23,6 +23,12 @@ The GUI and firmware include heartbeat/connection-loss handling. If communicatio
 
 ### Connection responsiveness
 
+Each drive shows a green **Running** indicator after its movement command is
+queued. It returns to **Idle** when the reported position reaches the commanded
+destination, movement is paused, or the connection closes. This reflects the
+GUI's commanded movement, not independent hardware confirmation. It remains
+visible during backlash take-up and does not distinguish that phase.
+
 Serial opening, reading, writing, and closing run in one background worker. The
 GUI queues commands; a successful enqueue does not mean the firmware has
 acknowledged execution. Writes have a 200 ms timeout, and no blocking serial
@@ -63,6 +69,10 @@ python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -r software/requirements.txt
 ```
+
+MRI trajectory reslicing uses SciPy on both Windows and macOS. The Explorer
+computes its three full-resolution planes concurrently and presents them as one
+frame; slider input replaces the pending state instead of accumulating renders.
 
 If you are using the existing local conda environment on this machine, launch with:
 
@@ -205,9 +215,34 @@ Trajectory tools:
 
 The blue probe line updates as the linked motor position changes. The red target line is linked to the main GUI target value.
 
+### Explorer
+
+Click **Trajectories** to open a single window for trajectory work. **Explorer**
+opens by default, followed by **Summary**, a divider, and one tab per drive.
+The individual drive buttons have been removed from the main console; select
+its tab in Trajectories instead. Anatomy remains a dedicated MRI slice viewer.
+
+The **Explorer** tab supports free MRI exploration.
+It shows Inline, Inline 90, and Perpendicular planes around a shared origin.
+Three vertical sliders adjust AP, Lat, and Twist rotations; the numeric fields
+below them accept angles in degrees. Scrolling moves through the hovered plane
+along its rotated normal, in 0.5 mm increments. X/Y/Z update together as needed
+to follow that direction. With zero rotation, the three planes scroll along X,
+Y, and Z respectively. The origin can
+also be entered directly or returned to the volume center with **Center origin**.
+Explorer settings are saved with the application and do not alter a drive's
+trajectory, target, or motor position.
+
+To use the explored path for a drive, choose it in the Explorer sidebar and click
+**Assign to drive**. This copies X/Y/Z, AP/Lat/Twist, and zoom into that drive's
+trajectory and switches to its drive tab. The summary also updates. Probe calibration,
+target settings, and motor position are preserved; assignment does not command
+movement. The trajectory viewer also has an editable **Z (mm)** field. Existing
+saved trajectories default to Z = 0.
+
 ## Trajectory Summary
 
-Click **Trajectory Summary** to open a grid of trajectory views across all drives.
+Select **Summary** in the Trajectories window to compare all drives in a grid.
 
 Each tile shows one drive with:
 
@@ -216,7 +251,10 @@ Each tile shows one drive with:
 - blue probe line
 - red target line
 
-The summary viewer runs in a separate subprocess so MRI rendering does not block the main control GUI.
+The Trajectories window runs in a separate subprocess, shares one loaded MRI
+between its tabs, and creates each drive view when first selected. Hidden tabs
+keep the latest drive state while MRI rendering and probe-map work are suspended.
+Switching back displays the current positions.
 
 Anatomy loading and slice computation also run on a background worker inside
 each viewer. Obsolete render results are discarded, and zoom uses cached slices.

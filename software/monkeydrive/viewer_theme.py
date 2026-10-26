@@ -9,13 +9,17 @@ from .console_theme import ConsoleTheme as Theme
 
 
 def configure_viewer(window):
-    # Keep fonts alive for this window without changing Tk's global named fonts.
-    window._viewer_font = tkfont.nametofont('TkDefaultFont', root=window).copy()
-    window._viewer_font.configure(size=11)
-    window._viewer_heading_font = window._viewer_font.copy()
-    window._viewer_heading_font.configure(size=17, weight='bold')
-    window._viewer_section_font = window._viewer_font.copy()
-    window._viewer_section_font.configure(size=11, weight='bold')
+    # Panels share styles, so retain their fonts for the interpreter's lifetime.
+    root = window._root()
+    if not hasattr(root, '_viewer_fonts'):
+        normal = tkfont.nametofont('TkDefaultFont', root=window).copy()
+        normal.configure(size=11)
+        heading = normal.copy()
+        heading.configure(size=17, weight='bold')
+        section = normal.copy()
+        section.configure(size=11, weight='bold')
+        root._viewer_fonts = normal, heading, section
+    window._viewer_font, window._viewer_heading_font, window._viewer_section_font = root._viewer_fonts
     style = ttk.Style(window)
     if style.theme_use() != 'clam':
         style.theme_use('clam')
@@ -24,6 +28,7 @@ def configure_viewer(window):
                     bordercolor='#dce2e9', relief='flat')
     style.map('Viewer.TButton', background=[('active', Theme.COLOR_ACTIVE_BG)],
               foreground=[('disabled', '#929ba7')])
+    style.configure('Selected.Viewer.TButton', background='#eaf1fa', foreground='#225da8')
     style.configure('Primary.Viewer.TButton', background='#225da8', foreground='white')
     style.map('Primary.Viewer.TButton', background=[('active', '#194b89')],
               foreground=[('disabled', '#b7c6da'), ('!disabled', 'white')])
@@ -31,6 +36,21 @@ def configure_viewer(window):
                     background=Theme.COLOR_BG, foreground='#626e7d')
     style.configure('Heading.Viewer.TLabel', font=window._viewer_heading_font,
                     foreground=Theme.COLOR_FG)
+    # Separate flat images let the handle be white without recoloring the track
+    # or adding a border to the control.
+    root = window._root()
+    if not hasattr(root, '_zoom_slider_images'):
+        track = tk.PhotoImage(master=root, width=1, height=15)
+        track.put('#dce2e9', to=(0, 0, 1, 15))
+        thumb = tk.PhotoImage(master=root, width=30, height=15)
+        thumb.put('#ffffff', to=(0, 0, 30, 15))
+        root._zoom_slider_images = (track, thumb)
+        style.element_create('PlainZoom.trough', 'image', track, sticky='ew')
+        style.element_create('PlainZoom.slider', 'image', thumb)
+        style.layout('PlainZoom.Horizontal.TScale', [
+            ('PlainZoom.trough', {'sticky': 'ew', 'children': [
+                ('PlainZoom.slider', {'side': 'left', 'sticky': ''})]})])
+    style.configure('PlainZoom.Horizontal.TScale', background=Theme.COLOR_BG)
 
 
 def viewer_button(parent, **options):
@@ -42,6 +62,27 @@ def viewer_button(parent, **options):
 def viewer_heading(parent, title, subtitle):
     ttk.Label(parent, text=title, style='Heading.Viewer.TLabel').pack(anchor='w')
     ttk.Label(parent, text=subtitle, style='Viewer.TLabel').pack(anchor='w', pady=(3, 16))
+
+
+def viewer_zoom(parent, variable, command, maximum, length):
+    """Flat gray track and white handle, retaining tenth-step zoom changes."""
+    def changed(value):
+        zoom = max(0.5, min(maximum, round(float(value), 1)))
+        if abs(variable.get() - zoom) > 1e-9:
+            variable.set(zoom)
+        command()
+
+    slider = ttk.Scale(parent, from_=0.5, to=maximum, orient=tk.HORIZONTAL,
+                       variable=variable, command=changed, length=length,
+                       style='PlainZoom.Horizontal.TScale')
+
+    def nudge(delta):
+        changed(variable.get() + delta)
+        return 'break'
+
+    for key, delta in (('Left', -0.1), ('Down', -0.1), ('Right', 0.1), ('Up', 0.1)):
+        slider.bind(f'<{key}>', lambda _event, step=delta: nudge(step))
+    return slider
 
 
 def style_viewer(window, widget=None):
@@ -59,12 +100,12 @@ def style_viewer(window, widget=None):
         widget.configure(font=window._viewer_font, background=Theme.COLOR_BG,
                          foreground=Theme.COLOR_FG, activebackground=Theme.COLOR_ACTIVE_BG,
                          activeforeground=Theme.COLOR_FG, selectcolor='white', highlightthickness=0)
-    elif isinstance(widget, tk.Entry):
+    elif isinstance(widget, tk.Entry) and not isinstance(widget, ttk.Entry):
         widget.configure(font=window._viewer_font, background='white', foreground=Theme.COLOR_FG,
                          insertbackground=Theme.COLOR_FG, readonlybackground=Theme.COLOR_BG,
                          relief='flat', borderwidth=0, highlightthickness=1,
                          highlightbackground='#dce2e9', highlightcolor='#225da8')
-    elif isinstance(widget, tk.Scale):
+    elif isinstance(widget, tk.Scale) and not isinstance(widget, ttk.Scale):
         widget.configure(font=window._viewer_font, background=Theme.COLOR_BG,
                          foreground=Theme.COLOR_FG, activebackground=Theme.COLOR_ACTIVE_BG,
                          troughcolor='#dce2e9', highlightthickness=0, borderwidth=0,

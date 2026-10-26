@@ -26,11 +26,12 @@ def _preload_mri_dependencies():
     """Import MRI libraries before starting subprocess helper threads."""
     _import_numpy()
     try:
+        import scipy.ndimage  # noqa: F401
         import nibabel  # noqa: F401
         import pydicom  # noqa: F401
     except ImportError as exc:
         raise AnatomyDependencyError(
-            "MRI support requires numpy, nibabel, and pydicom. "
+            "MRI support requires numpy, scipy, nibabel, and pydicom. "
             "Install the packages in software/requirements.txt."
         ) from exc
 

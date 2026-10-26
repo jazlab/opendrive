@@ -36,7 +36,9 @@ class ViewerCommands:
                 if previous and previous['type'] == 'motor_state':
                     state = dict(previous['motor_state'])
                     state['absolute'] = message['position']
-                    message = {'type': 'motor_state', 'motor_state': state}
+                    message = {**previous, 'motor_state': state}
+            elif kind == 'trajectory_state':
+                key = (kind, message.get('motor_id'))
             else:
                 key = (kind, None)
             # Replacing in place keeps a noisy motor from starving other motors.
@@ -56,16 +58,20 @@ class ViewerCommands:
 class LatestWorker:
     """One worker per viewer; computation never touches Tk.
 
-    One pending request/result per key, and obsolete results are discarded.
+    One pending request/result per key. By default, obsolete results are discarded.
+    Progressive mode delivers completed frames while newer requests are queued;
+    invalidation still discards all work from the previous generation.
     submit/invalidate/close and completion callbacks all run on the Tk thread.
     """
-    def __init__(self, widget):
+    def __init__(self, widget, progressive=False):
         self._widget = widget
         self._condition = threading.Condition()
         self._pending = OrderedDict()
         self._results = {}
         self._versions = {}
         self._sequence = 0
+        self._generation = 0
+        self._progressive = progressive
         self._closed = False
         self._thread = threading.Thread(target=self._run, daemon=True, name='MRI rendering')
         self._thread.start()
@@ -77,12 +83,14 @@ class LatestWorker:
                 return
             self._sequence += 1
             self._versions[key] = self._sequence
-            self._pending[key] = (self._sequence, compute, complete)
-            self._results.pop(key, None)
+            self._pending[key] = (self._sequence, self._generation, compute, complete)
+            if not self._progressive:
+                self._results.pop(key, None)
             self._condition.notify()
 
     def invalidate(self):
         with self._condition:
+            self._generation += 1
             self._pending.clear()
             self._results.clear()
             self._versions.clear()
@@ -103,14 +111,15 @@ class LatestWorker:
                 self._condition.wait_for(lambda: self._closed or self._pending)
                 if self._closed:
                     return
-                key, (version, compute, complete) = self._pending.popitem(last=False)
+                key, (version, generation, compute, complete) = self._pending.popitem(last=False)
             try:
                 result, error = compute(), None
             except Exception as exc:
                 result, error = None, exc
             with self._condition:
-                if not self._closed and self._versions.get(key) == version:
-                    self._results[key] = (version, complete, result, error)
+                if (not self._closed and generation == self._generation
+                        and (self._progressive or self._versions.get(key) == version)):
+                    self._results[key] = (version, generation, complete, result, error)
 
     def _poll(self):
         self._job = None
@@ -118,10 +127,10 @@ class LatestWorker:
             with self._condition:
                 results = list(self._results.items())
                 self._results.clear()
-            for key, (version, complete, result, error) in results:
+            for key, (version, generation, complete, result, error) in results:
                 if self._closed:
                     break
-                if self._versions.get(key) == version:
+                if generation == self._generation and (self._progressive or self._versions.get(key) == version):
                     try:
                         complete(result, error)
                     except Exception:

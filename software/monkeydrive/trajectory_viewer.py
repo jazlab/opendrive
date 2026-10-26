@@ -22,14 +22,14 @@ from .anatomy import (
 from .anatomy_viewer import ContrastWindowControl
 from .config import Config
 from .console_theme import ConsoleTheme as Theme
-from .viewer_theme import configure_viewer, style_viewer, viewer_button, viewer_heading
+from .viewer_theme import configure_viewer, style_viewer, viewer_button, viewer_heading, viewer_zoom
 from .viewer_tasks import LatestWorker
 from .models import TrajectoryState
 from .probe_map_colors import color_from_lut, load_shank_lut
 from .spikeglx_client import SpikeGLXConfig, SpikeGLXLiveClient, SpikeGLXUnavailable
 
 
-class TrajectoryViewer(tk.Toplevel):
+class _TrajectoryView:
     """Motor-specific trajectory viewer."""
 
     PLANES = (
@@ -48,10 +48,12 @@ class TrajectoryViewer(tk.Toplevel):
         orientation_actual: str,
         orientation_scanner: str,
         on_save: Callable[[int, TrajectoryState], None],
+        managed: bool = False,
     ):
         """Initialize a trajectory viewer."""
         super().__init__(parent)
         configure_viewer(self)
+        self._active = not managed
 
         self._motor_id = motor_id
         self._trajectory = TrajectoryState.from_dict(trajectory.to_dict())
@@ -101,6 +103,7 @@ class TrajectoryViewer(tk.Toplevel):
 
         self._x_var = tk.StringVar(value=f"{self._trajectory.x:g}")
         self._y_var = tk.StringVar(value=f"{self._trajectory.y:g}")
+        self._z_var = tk.StringVar(value=f"{self._trajectory.z:g}")
         self._ap_var = tk.StringVar(value=f"{self._trajectory.ap_rotation:g}")
         self._ml_var = tk.StringVar(value=f"{self._trajectory.ml_rotation:g}")
         self._twist_var = tk.StringVar(value=f"{self._trajectory.twist_rotation:g}")
@@ -114,24 +117,55 @@ class TrajectoryViewer(tk.Toplevel):
         self._target_button: tk.Button | None = None
         self._target_editing = False
 
-        self.title(f"Motor {motor_id} Trajectory")
-        self.geometry("1700x860")
-        self.minsize(900, 680)
+        if isinstance(self, tk.Toplevel):
+            self.title(f"Motor {motor_id} Trajectory")
+            self.geometry("1700x860")
+            self.minsize(900, 680)
 
-        parent_x = parent.winfo_x()
-        parent_y = parent.winfo_y()
-        parent_width = parent.winfo_width()
-        self.geometry(f"+{parent_x + parent_width + 10}+{parent_y}")
+            parent_x = parent.winfo_x()
+            parent_y = parent.winfo_y()
+            parent_width = parent.winfo_width()
+            self.geometry(f"+{parent_x + parent_width + 10}+{parent_y}")
 
         self._build_ui()
         self._style_widget_tree()
-        self.after(100, self._poll_probe_map_events)
-        self.after(100, self._load_anatomy)
-        if self._trajectory.probe_map_enabled:
+        self._probe_poll_job = self.after(100, self._poll_probe_map_events)
+        if not managed:
+            self.after(100, self._load_anatomy)
+        if self._active and self._trajectory.probe_map_enabled:
             self.after(250, self._restart_probe_map_worker)
+
+    def set_volume(self, volume, actual='', scanner=''):
+        self._render_worker.invalidate()
+        self._render_signatures.clear()
+        self._source_signatures.clear()
+        self._source_images.clear()
+        self._volume = volume
+        self._orientation_actual_key, self._orientation_scanner_key = actual, scanner
+        self._status_var.set(volume.display_name)
+        self._render_all()
+
+    def set_active(self, active):
+        self._active = active
+        if active:
+            self.update_motor_position(self._motor_position)
+            self._render_all()
+            if self._trajectory.probe_map_enabled:
+                self._restart_probe_map_worker()
+        else:
+            self._render_worker.invalidate()
+            self._render_signatures.clear()
+            self._stop_probe_map_worker()
+            self._cancel_probe_map_overlay_draw()
 
     def destroy(self):
         """Stop live probe-map work before destroying this window."""
+        if getattr(self, '_probe_poll_job', None) is not None:
+            self.after_cancel(self._probe_poll_job)
+            self._probe_poll_job = None
+        if self._live_update_job is not None:
+            self.after_cancel(self._live_update_job)
+            self._live_update_job = None
         self._render_worker.close()
         self._stop_probe_map_worker()
         self._cancel_probe_map_overlay_draw()
@@ -151,11 +185,8 @@ class TrajectoryViewer(tk.Toplevel):
 
         tk.Label(toolbar, text="Zoom:").pack(side=tk.LEFT, padx=(0, 6))
         viewer_button(toolbar, text="-", command=lambda: self._adjust_zoom(-0.1), width=3).pack(side=tk.LEFT)
-        tk.Scale(
-            toolbar, from_=0.5, to=10.0, resolution=0.1, orient=tk.HORIZONTAL,
-            variable=self._zoom_var, command=self._on_zoom_change,
-            showvalue=False, length=220
-        ).pack(side=tk.LEFT, padx=4)
+        viewer_zoom(toolbar, self._zoom_var, self._on_zoom_change,
+                    maximum=10.0, length=220).pack(side=tk.LEFT, padx=4)
         viewer_button(toolbar, text="+", command=lambda: self._adjust_zoom(0.1), width=3).pack(side=tk.LEFT)
         tk.Label(toolbar, textvariable=self._zoom_var, width=4, anchor="center").pack(side=tk.LEFT, padx=(6, 0))
         viewer_button(toolbar, text="Save", command=self._save_fields, width=8).pack(side=tk.LEFT, padx=(18, 0))
@@ -189,6 +220,7 @@ class TrajectoryViewer(tk.Toplevel):
         tk.Label(parameter_frame, text="Trajectory").pack(anchor='w')
         self._add_field(parameter_frame, "X (mm):", self._x_var)
         self._add_field(parameter_frame, "Y (mm):", self._y_var)
+        self._add_field(parameter_frame, "Z (mm):", self._z_var)
         self._add_field(parameter_frame, "A-P rot:", self._ap_var)
         self._add_field(parameter_frame, "M-L rot:", self._ml_var)
         self._add_field(parameter_frame, "Twist:", self._twist_var)
@@ -404,9 +436,14 @@ class TrajectoryViewer(tk.Toplevel):
             probe_map_min_mv = self._trajectory.probe_map_min_mv
             probe_map_max_mv = self._trajectory.probe_map_max_mv
             probe_map_update_ms = self._trajectory.probe_map_update_ms
+            if not all(np.isfinite(float(variable.get())) for variable in (
+                    self._x_var, self._y_var, self._z_var, self._ap_var,
+                    self._ml_var, self._twist_var, self._offset_var, self._zoom_var)):
+                raise ValueError('Trajectory fields must be finite')
             self._trajectory = TrajectoryState(
                 x=float(self._x_var.get()),
                 y=float(self._y_var.get()),
+                z=float(self._z_var.get()),
                 ap_rotation=float(self._ap_var.get()),
                 ml_rotation=float(self._ml_var.get()),
                 twist_rotation=float(self._twist_var.get()),
@@ -427,7 +464,7 @@ class TrajectoryViewer(tk.Toplevel):
             if show_warning and not self._field_warning_active:
                 self._field_warning_active = True
                 try:
-                    messagebox.showwarning("Invalid Trajectory", "Trajectory fields must be numeric.", parent=self)
+                    messagebox.showwarning("Invalid Trajectory", "Trajectory fields must be finite numbers.", parent=self)
                 finally:
                     self._field_warning_active = False
             return False
@@ -436,10 +473,11 @@ class TrajectoryViewer(tk.Toplevel):
             self._render_all()
         return True
 
-    def _trajectory_render_signature(self) -> tuple[float, float, float, float, float, float, float]:
+    def _trajectory_render_signature(self) -> tuple[float, ...]:
         return (
             self._trajectory.x,
             self._trajectory.y,
+            self._trajectory.z,
             self._trajectory.ap_rotation,
             self._trajectory.ml_rotation,
             self._trajectory.twist_rotation,
@@ -450,6 +488,16 @@ class TrajectoryViewer(tk.Toplevel):
     def _save_fields(self):
         if self._apply_fields(show_warning=True):
             self._on_save(self._motor_id, self._trajectory)
+
+    def update_trajectory(self, trajectory: TrajectoryState):
+        """Apply an externally assigned trajectory without echoing a save."""
+        self._trajectory = TrajectoryState.from_dict(trajectory.to_dict())
+        for variable, key in ((self._x_var, 'x'), (self._y_var, 'y'), (self._z_var, 'z'),
+                              (self._ap_var, 'ap_rotation'), (self._ml_var, 'ml_rotation'),
+                              (self._twist_var, 'twist_rotation'), (self._offset_var, 'perpendicular_offset')):
+            variable.set(f'{getattr(self._trajectory, key):g}')
+        self._zoom_var.set(self._trajectory.zoom)
+        self._render_all()
 
     def _on_probe_map_settings_change(self):
         if not self._apply_probe_map_fields(show_warning=True):
@@ -464,6 +512,8 @@ class TrajectoryViewer(tk.Toplevel):
             self._clear_probe_map_overlay()
 
     def _restart_probe_map_worker(self):
+        if not self._active:
+            return
         if not self._apply_probe_map_fields(show_warning=False):
             return
         self._stop_probe_map_worker()
@@ -558,7 +608,7 @@ class TrajectoryViewer(tk.Toplevel):
         if latest_snapshot is not None and latest_snapshot_generation == self._probe_map_generation:
             self._handle_probe_map_event(latest_snapshot)
         if self.winfo_exists():
-            self.after(100, self._poll_probe_map_events)
+            self._probe_poll_job = self.after(100, self._poll_probe_map_events)
 
     def _handle_probe_map_event(self, event: tuple):
         kind = event[0]
@@ -643,6 +693,8 @@ class TrajectoryViewer(tk.Toplevel):
             self._render_plane(axis)
 
     def _render_plane(self, axis: int):
+        if not self._active:
+            return
         if not self._volume:
             return
         if self._pane_collapsed.get(axis, False):
@@ -725,7 +777,7 @@ class TrajectoryViewer(tk.Toplevel):
         return tuple(origin + (probe_axis * self._active_perpendicular_offset()))
 
     def _trajectory_origin(self):
-        return (self._trajectory.x, self._trajectory.y, 0.0)
+        return (self._trajectory.x, self._trajectory.y, self._trajectory.z)
 
     def _active_perpendicular_offset(self) -> float:
         if self._trajectory.probe_location_set:
@@ -741,6 +793,8 @@ class TrajectoryViewer(tk.Toplevel):
     def update_motor_position(self, motor_position: float):
         """Update the linked motor position and redraw probe-dependent views."""
         self._motor_position = round(float(motor_position), 3)
+        if not self._active:
+            return
         if self._trajectory.probe_location_set:
             self._offset_var.set(f"{self._active_perpendicular_offset():g}")
             self._redraw_inline_depth_lines()
@@ -974,6 +1028,8 @@ class TrajectoryViewer(tk.Toplevel):
                 continue
 
     def _schedule_probe_map_overlay_draw(self):
+        if not self._active:
+            return
         if self._probe_map_draw_job is not None:
             return
         try:
@@ -1069,6 +1125,8 @@ class TrajectoryViewer(tk.Toplevel):
         return "break"
 
     def _redraw_inline_depth_lines(self):
+        if not self._active:
+            return
         for axis in (0, 1):
             image_ref = self._image_refs.get(axis)
             canvas = self._canvases.get(axis)
@@ -1114,3 +1172,11 @@ class TrajectoryViewer(tk.Toplevel):
 
     def _style_widget_tree(self, widget=None):
         style_viewer(self, widget)
+
+
+class TrajectoryViewer(_TrajectoryView, tk.Toplevel):
+    """Standalone trajectory window, also used by regression and stress checks."""
+
+
+class TrajectoryPanel(_TrajectoryView, tk.Frame):
+    """Embeddable drive view for the shared Trajectories window."""

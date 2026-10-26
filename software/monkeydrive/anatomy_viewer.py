@@ -15,7 +15,7 @@ from .anatomy import (
 )
 from .config import Config
 from .console_theme import ConsoleTheme as Theme
-from .viewer_theme import configure_viewer, style_viewer, viewer_button, viewer_heading
+from .viewer_theme import configure_viewer, style_viewer, viewer_button, viewer_heading, viewer_zoom
 from .viewer_tasks import LatestWorker
 
 
@@ -96,11 +96,8 @@ class AnatomyViewer(tk.Toplevel):
 
         tk.Label(toolbar, text="Zoom:").pack(side=tk.LEFT, padx=(0, 6))
         viewer_button(toolbar, text="-", command=lambda: self._adjust_zoom(-0.1), width=3).pack(side=tk.LEFT)
-        tk.Scale(
-            toolbar, from_=0.5, to=3.0, resolution=0.1, orient=tk.HORIZONTAL,
-            variable=self._zoom_var, command=self._on_zoom_change,
-            showvalue=False, length=180
-        ).pack(side=tk.LEFT, padx=4)
+        viewer_zoom(toolbar, self._zoom_var, self._on_zoom_change,
+                    maximum=3.0, length=180).pack(side=tk.LEFT, padx=4)
         viewer_button(toolbar, text="+", command=lambda: self._adjust_zoom(0.1), width=3).pack(side=tk.LEFT)
         tk.Label(toolbar, textvariable=self._zoom_var, width=4, anchor="center").pack(side=tk.LEFT, padx=(6, 0))
 

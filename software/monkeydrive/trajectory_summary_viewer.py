@@ -28,7 +28,7 @@ from .probe_map_colors import color_from_lut, load_shank_lut
 from .spikeglx_client import SpikeGLXConfig, SpikeGLXLiveClient, SpikeGLXUnavailable
 
 
-class TrajectorySummaryViewer(tk.Toplevel):
+class _TrajectorySummaryView:
     """Grid of trajectory views across all motors."""
 
     INLINE = 0
@@ -41,9 +41,11 @@ class TrajectorySummaryViewer(tk.Toplevel):
         anatomy_path: str,
         orientation_actual: str = "",
         orientation_scanner: str = "",
+        managed: bool = False,
     ):
         super().__init__(parent)
         configure_viewer(self)
+        self._active = not managed
 
         self._motor_states = {
             state.motor_id: MotorState.from_dict(state.to_dict())
@@ -73,22 +75,65 @@ class TrajectorySummaryViewer(tk.Toplevel):
         self._probe_map_lut = load_shank_lut()
         self._probe_map_channel_pitch_mm = 0.01
 
-        self.title("Trajectory Summary")
-        self.geometry("1180x760")
-        self.minsize(640, 420)
+        if isinstance(self, tk.Toplevel):
+            self.title("Trajectory Summary")
+            self.geometry("1180x760")
+            self.minsize(640, 420)
 
-        parent_x = parent.winfo_x()
-        parent_y = parent.winfo_y()
-        parent_width = parent.winfo_width()
-        self.geometry(f"+{parent_x + parent_width + 20}+{parent_y + 30}")
+            parent_x = parent.winfo_x()
+            parent_y = parent.winfo_y()
+            parent_width = parent.winfo_width()
+            self.geometry(f"+{parent_x + parent_width + 20}+{parent_y + 30}")
 
         self._build_ui()
         self._style_widget_tree()
-        self.after(100, self._poll_probe_map_events)
+        self._probe_poll_job = self.after(100, self._poll_probe_map_events)
         self._sync_probe_map_workers()
-        self.after(100, self._load_anatomy)
+        if not managed:
+            self.after(100, self._load_anatomy)
+
+    def set_volume(self, volume, actual='', scanner=''):
+        self._render_worker.invalidate()
+        self._render_signatures.clear()
+        self._source_signatures.clear()
+        self._source_images.clear()
+        self._volume = volume
+        self._orientation_actual_key, self._orientation_scanner_key = actual, scanner
+        self._status_var.set(volume.display_name)
+        self._render_all()
+
+    def set_active(self, active):
+        self._active = active
+        if active:
+            self._sync_probe_map_workers()
+            self._render_all()
+        else:
+            self._render_worker.invalidate()
+            self._render_signatures.clear()
+            self._stop_all_probe_map_workers()
+
+    def set_motor_states(self, states):
+        self._render_worker.invalidate()
+        self._stop_all_probe_map_workers()
+        self._motor_states = {state.motor_id: MotorState.from_dict(state.to_dict()) for state in states}
+        for child in self.winfo_children():
+            child.destroy()
+        self._view_vars.clear()
+        self._canvases.clear()
+        self._image_items.clear()
+        self._image_refs.clear()
+        self._render_signatures.clear()
+        self._source_signatures.clear()
+        self._source_images.clear()
+        self._build_ui()
+        self._style_widget_tree()
+        self._sync_probe_map_workers()
+        self._render_all()
 
     def destroy(self):
+        if getattr(self, '_probe_poll_job', None) is not None:
+            self.after_cancel(self._probe_poll_job)
+            self._probe_poll_job = None
         self._render_worker.close()
         self._stop_all_probe_map_workers()
         try:
@@ -99,7 +144,7 @@ class TrajectorySummaryViewer(tk.Toplevel):
     def _build_ui(self):
         container = tk.Frame(self, padx=20, pady=18)
         container.pack(fill=tk.BOTH, expand=True)
-        viewer_heading(container, 'Trajectories', 'Compare probe positions across drives.')
+        viewer_heading(container, 'Summary', 'Compare probe positions across drives.')
 
         self._grid_frame = tk.Frame(container)
         self._grid_frame.pack(fill=tk.BOTH, expand=True)
@@ -181,6 +226,8 @@ class TrajectorySummaryViewer(tk.Toplevel):
         self._render_motor(state.motor_id)
 
     def _sync_probe_map_workers(self):
+        if not self._active:
+            return
         wanted: dict[int, int] = {}
         for state in self._motor_states.values():
             trajectory = state.trajectory
@@ -271,7 +318,7 @@ class TrajectorySummaryViewer(tk.Toplevel):
             self._render_probe_map_motors(probe)
 
         if self.winfo_exists():
-            self.after(100, self._poll_probe_map_events)
+            self._probe_poll_job = self.after(100, self._poll_probe_map_events)
 
     def _render_probe_map_motors(self, probe: int):
         for motor_id, state in self._motor_states.items():
@@ -284,6 +331,8 @@ class TrajectorySummaryViewer(tk.Toplevel):
             self._render_motor(motor_id)
 
     def _render_motor(self, motor_id: int):
+        if not self._active:
+            return
         if not self._volume:
             return
         canvas = self._canvases.get(motor_id)
@@ -330,6 +379,8 @@ class TrajectorySummaryViewer(tk.Toplevel):
         self._render_worker.submit(('plane', motor_id), compute, complete)
 
     def _redraw_motor_overlay(self, motor_id: int):
+        if not self._active:
+            return
         canvas = self._canvases.get(motor_id)
         state = self._motor_states.get(motor_id)
         image_ref = self._image_refs.get(motor_id)
@@ -371,7 +422,7 @@ class TrajectorySummaryViewer(tk.Toplevel):
         )
 
     def _trajectory_origin(self, trajectory: TrajectoryState):
-        return (trajectory.x, trajectory.y, 0.0)
+        return (trajectory.x, trajectory.y, trajectory.z)
 
     def _trajectory_basis(self, trajectory: TrajectoryState):
         x_axis = np.asarray([1.0, 0.0, 0.0])
@@ -521,3 +572,11 @@ class TrajectorySummaryViewer(tk.Toplevel):
 
     def _style_widget_tree(self, widget=None):
         style_viewer(self, widget)
+
+
+class TrajectorySummaryViewer(_TrajectorySummaryView, tk.Toplevel):
+    """Standalone summary window."""
+
+
+class TrajectorySummaryPanel(_TrajectorySummaryView, tk.Frame):
+    """Embeddable summary for the shared Trajectories window."""

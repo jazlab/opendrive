@@ -46,6 +46,7 @@ class TrajectoryState:
     probe_map_min_mv: float = 0.0
     probe_map_max_mv: float = 2.5
     probe_map_update_ms: int = 500
+    z: float = 0.0
 
     def to_dict(self) -> dict:
         """Convert trajectory to a dictionary."""
@@ -57,6 +58,7 @@ class TrajectoryState:
         return cls(
             x=float(data.get('x', 0.0)),
             y=float(data.get('y', 0.0)),
+            z=float(data.get('z', 0.0)),
             ap_rotation=float(data.get('ap_rotation', 0.0)),
             ml_rotation=float(data.get('ml_rotation', 0.0)),
             twist_rotation=float(data.get('twist_rotation', 0.0)),
