@@ -41,7 +41,7 @@ class GuiSerialTests(unittest.TestCase):
         self.callback_errors = []
         self.app.root.report_callback_exception = lambda *error: self.callback_errors.append(error)
         self.app.root.withdraw()
-        self.app._port_var.set('fake')
+        self.app.view.port_var.set('fake')
 
     def open_port(self, **kwargs):
         if self.open_gate:
@@ -97,30 +97,30 @@ class GuiSerialTests(unittest.TestCase):
         for mode in (Config.MODE_TARGET, Config.MODE_STEP, Config.MODE_PROGRAM, Config.MODE_TARGET):
             app._select_mode(mode)
             app.root.update()
-            self.assertEqual(len(app._motor_widgets), 6)
+            self.assertEqual(len(app.view.motor_widgets), 6)
             self.assertEqual(app.motor_states[0].absolute, 2.375)
-            self.assertEqual(app._motor_widgets[0]['absolute_var'].get(), '2.375')
+            self.assertEqual(app.view.motor_widgets[0]['absolute_var'].get(), '2.375')
             self.assertTrue(app.motor_states[1].is_selected)
-            self.assertTrue(app._selection_text.get().startswith('1 of 6'))
-            frame = (app._step_controls_frame if mode == Config.MODE_STEP else
-                     app._program_controls_frame if mode == Config.MODE_PROGRAM else app._target_controls_frame)
+            self.assertTrue(app.view.selection_text.get().startswith('1 of 6'))
+            frame = (app.view.step_controls_frame if mode == Config.MODE_STEP else
+                     app.view.program_controls_frame if mode == Config.MODE_PROGRAM else app.view.target_controls_frame)
             self.assertTrue(frame.winfo_ismapped())
-            self.assertEqual(app._stop_all_btn.cget('text'), 'Pause All')
-            self.assertGreater(app._stop_all_btn.winfo_rooty(), frame.winfo_rooty() + frame.winfo_height())
-            self.assertAlmostEqual(app._stop_all_btn.winfo_rootx() + app._stop_all_btn.winfo_width() / 2,
+            self.assertEqual(app.view.stop_all_btn.cget('text'), 'Pause All')
+            self.assertGreater(app.view.stop_all_btn.winfo_rooty(), frame.winfo_rooty() + frame.winfo_height())
+            self.assertAlmostEqual(app.view.stop_all_btn.winfo_rootx() + app.view.stop_all_btn.winfo_width() / 2,
                                    app.root.winfo_rootx() + app.root.winfo_width() / 2, delta=1)
-            bottom = app._motors_container.winfo_rooty() + app._motors_container.winfo_height()
+            bottom = app.view.motors_container.winfo_rooty() + app.view.motors_container.winfo_height()
             self.assertGreater(frame.winfo_rooty(), bottom)
-            for row in app._motor_widgets:
+            for row in app.view.motor_widgets:
                 for widget in row['all_widgets']:
                     self.assertGreater(widget.winfo_width(), 1)
                     self.assertLessEqual(widget.winfo_rootx() + widget.winfo_width(),
                                          app.root.winfo_rootx() + app.root.winfo_width())
         app._enable_absolute_edit(2)
-        app._motor_widgets[1]['absolute_var'].set('3.250')
+        app.view.motor_widgets[1]['absolute_var'].set('3.250')
         app._on_absolute_confirm(2)
         self.assertEqual(app.motor_states[1].absolute, 3.25)
-        self.assertEqual(app._motor_widgets[1]['absolute_entry'].cget('state'), 'readonly')
+        self.assertEqual(app.view.motor_widgets[1]['absolute_entry'].cget('state'), 'readonly')
 
     def test_small_step_input_is_preserved_and_sent_to_controller(self):
         app = self.app
@@ -133,11 +133,11 @@ class GuiSerialTests(unittest.TestCase):
         for value in ('0.005', '0.001'):
             with self.subTest(value=value):
                 app._enable_step_setting_edit('size')
-                app._step_size_var.set(value)
+                app.view.step_size_var.set(value)
                 app._confirm_step_setting_edit('size')
-                self.assertEqual(app._step_size_var.get(), value)
+                self.assertEqual(app.view.step_size_var.get(), value)
                 app._on_step(direction=1)
-                expected = P.cmd_run(1, float(app._step_speed_var.get()),
+                expected = P.cmd_run(1, float(app.view.step_speed_var.get()),
                                      10.0 + float(value), 10.0)
                 self.pump_until(lambda: expected in self.ports[-1].writes)
 
@@ -146,14 +146,14 @@ class GuiSerialTests(unittest.TestCase):
         for value in ('0', '-0.005', '0.0001', 'nan', 'inf'):
             with self.subTest(value=value):
                 app._enable_step_setting_edit('size')
-                app._step_size_var.set(value)
+                app.view.step_size_var.set(value)
                 app._confirm_step_setting_edit('size')
-                self.assertEqual(app._step_size_var.get(), '0.001')
-        app._step_size_var.set('0.005')
+                self.assertEqual(app.view.step_size_var.get(), '0.001')
+        app.view.step_size_var.set('0.005')
         # Exercise the same adjustment handler without depending on desktop focus.
-        app._adjust_numeric_entry(app._step_size_var, Config.STEP_SIZE_KEY_INCREMENT,
+        app.view.adjust_numeric_entry(app.view.step_size_var, Config.STEP_SIZE_KEY_INCREMENT,
                                   3, min_value=Config.MIN_STEP_SIZE)
-        self.assertEqual(app._step_size_var.get(), '0.015')
+        self.assertEqual(app.view.step_size_var.get(), '0.015')
 
     def test_running_indicator_tracks_target_step_and_program_completion(self):
         app = self.app
@@ -172,27 +172,27 @@ class GuiSerialTests(unittest.TestCase):
                 state.instruction_status = 'idle'
                 app._select_mode(mode)
                 if mode == Config.MODE_STEP:
-                    app._step_size_var.set('0.100')
+                    app.view.step_size_var.set('0.100')
                     app._on_step(1)
                 else:
                     app._on_run()
                 app._refresh_running_indicators()
-                self.assertEqual(app._motor_widgets[0]['motion_status'].cget('text'), 'Running')
+                self.assertEqual(app.view.motor_widgets[0]['motion_status'].cget('text'), 'Running')
                 # Unchanged position during take-up must not clear the indicator.
                 app._on_position_update(1, 10.0)
                 app._refresh_running_indicators()
-                self.assertEqual(app._motor_widgets[0]['motion_status'].cget('text'), 'Running')
+                self.assertEqual(app.view.motor_widgets[0]['motion_status'].cget('text'), 'Running')
                 # Rebuilding the table retains the transient running destination.
                 app._rebuild_motor_rows()
                 app._refresh_running_indicators()
-                self.assertEqual(app._motor_widgets[0]['motion_status'].cget('text'), 'Running')
+                self.assertEqual(app.view.motor_widgets[0]['motion_status'].cget('text'), 'Running')
                 app._on_position_update(1, 10.1)
                 if mode == Config.MODE_PROGRAM:
                     app._refresh_running_indicators()
-                    self.assertEqual(app._motor_widgets[0]['motion_status'].cget('text'), 'Running')
+                    self.assertEqual(app.view.motor_widgets[0]['motion_status'].cget('text'), 'Running')
                     app._on_position_update(1, 10.2)
                 app._refresh_running_indicators()
-                self.assertEqual(app._motor_widgets[0]['motion_status'].cget('text'), 'Idle')
+                self.assertEqual(app.view.motor_widgets[0]['motion_status'].cget('text'), 'Idle')
 
     def test_running_indicator_clears_on_pause_disconnect_and_failed_send(self):
         app = self.app
@@ -205,25 +205,25 @@ class GuiSerialTests(unittest.TestCase):
         for stop in (app._on_pause, app.serial_manager.disconnect):
             app._on_run()
             app._refresh_running_indicators()
-            self.assertEqual(app._motor_widgets[0]['motion_status'].cget('text'), 'Running')
+            self.assertEqual(app.view.motor_widgets[0]['motion_status'].cget('text'), 'Running')
             stop()
             app._refresh_running_indicators()
-            self.assertEqual(app._motor_widgets[0]['motion_status'].cget('text'), 'Idle')
-        state.is_running = app._queue_motion(state, P.cmd_run(1, .01, 11, 10))
+            self.assertEqual(app.view.motor_widgets[0]['motion_status'].cget('text'), 'Idle')
+        state.is_running = app.motion.queue_motion(state, P.cmd_run(1, .01, 11, 10))
         app._refresh_running_indicators()
         self.assertFalse(state.is_running)
-        self.assertEqual(app._motor_widgets[0]['motion_status'].cget('text'), 'Idle')
+        self.assertEqual(app.view.motor_widgets[0]['motion_status'].cget('text'), 'Idle')
 
     def test_slow_connection_keeps_tk_responsive(self):
         self.open_gate = threading.Event()
         self.app._on_connect()
-        self.assertEqual(self.app._connect_btn.cget('text'), 'Connecting...')
+        self.assertEqual(self.app.view.connect_btn.cget('text'), 'Connecting...')
         ticks = []
         self.app.root.after(10, lambda: ticks.append(True))
         self.pump_until(lambda: ticks)
         self.assertFalse(self.app.serial_manager.is_connected)
         self.open_gate.set()
-        self.pump_until(lambda: self.app._connect_btn.cget('text') == 'Disconnect')
+        self.pump_until(lambda: self.app.view.connect_btn.cget('text') == 'Disconnect')
         self.assertTrue(self.app.serial_manager.is_connected)
 
     def test_explorer_assignment_updates_viewers_without_moving_drive(self):
@@ -260,7 +260,7 @@ class GuiSerialTests(unittest.TestCase):
 
     def test_trajectories_button_opens_one_workspace_and_rows_have_no_trajectory_button(self):
         app = self.app
-        self.assertNotIn('trajectory_button', app._motor_widgets[0])
+        self.assertNotIn('trajectory_button', app.view.motor_widgets[0])
         app._saved_anatomy_path = 'synthetic.nii'
         with patch('monkeydrive_gui.JsonViewerProcess') as process:
             app._on_trajectory_summary()
@@ -280,16 +280,16 @@ class GuiSerialTests(unittest.TestCase):
             second.absolute, second.relative, second.relative_zero_point = -2.5, -1.5, -1
             app._select_only_motor(2)
             with patch.object(app.serial_manager, 'send') as send:
-                app._motor_widgets[0]['zero_button'].invoke()
+                app.view.motor_widgets[0]['zero_button'].invoke()
                 self.assertEqual((first.absolute, first.relative, first.relative_zero_point), (5.25, 0, 5.25))
                 self.assertEqual((second.relative, second.relative_zero_point), (-1.5, -1))
                 self.assertFalse(first.is_selected)
                 self.assertTrue(second.is_selected)
-                self.assertEqual(app._motor_widgets[0]['relative_var'].get(), '0.000')
+                self.assertEqual(app.view.motor_widgets[0]['relative_var'].get(), '0.000')
                 first.relative, first.relative_zero_point = 1.25, 4
-                controls = {Config.MODE_TARGET: app._target_controls_frame,
-                            Config.MODE_STEP: app._step_controls_frame,
-                            Config.MODE_PROGRAM: app._program_controls_frame}[mode]
+                controls = {Config.MODE_TARGET: app.view.target_controls_frame,
+                            Config.MODE_STEP: app.view.step_controls_frame,
+                            Config.MODE_PROGRAM: app.view.program_controls_frame}[mode]
                 buttons = [button for group in controls.winfo_children() for button in group.winfo_children()]
                 zero_selected = next(button for button in buttons if button.cget('text') == 'Zero Selected')
                 zero_selected.invoke()
@@ -307,7 +307,7 @@ class GuiSerialTests(unittest.TestCase):
         app.motor_states[0].trajectory.z = 3.5
         app.motor_states[1].notes = 'Drive two'
         app._explorer_state = dict(x=2, y=3, z=4, ap_rotation=12)
-        app._step_size_var.set('.001')
+        app.view.step_size_var.set('.001')
         app._select_mode(Config.MODE_PROGRAM)
         app._saved_anatomy_path = '/missing/subject.nii'
         app._on_notes_click(1)
@@ -327,9 +327,9 @@ class GuiSerialTests(unittest.TestCase):
                 app._on_load_config()
                 self.pump_until(lambda: not app._config_busy)
             self.assertEqual(app._workspace_snapshot(), {**saved, 'step_speed': '0.01', 'step_size': '0.001'})
-            self.assertEqual(app._motor_widgets[0]['absolute_var'].get(), '6.125')
-            self.assertEqual(app._mode_var.get(), Config.MODE_PROGRAM)
-            self.assertEqual(len(app._motor_widgets), 2)
+            self.assertEqual(app.view.motor_widgets[0]['absolute_var'].get(), '6.125')
+            self.assertEqual(app.view.mode_var.get(), Config.MODE_PROGRAM)
+            self.assertEqual(len(app.view.motor_widgets), 2)
             self.assertEqual(app._notes_windows, {})
             error.assert_not_called()
             # Loading also becomes the next automatic startup state.
@@ -367,8 +367,8 @@ class GuiSerialTests(unittest.TestCase):
         self.assertEqual(app.motor_states[0].absolute, 7.25)
         self.assertFalse(app.motor_states[0].is_running)
         self.assertFalse(any(P.parse_response(command)[0] in ('RUN', 'TARGET') for command in port.writes))
-        self.assertEqual(app._motion_targets, {})
-        self.assertEqual(app._connect_btn.cget('text'), 'Connect')
+        self.assertEqual(app.motion.motion_targets, {})
+        self.assertEqual(app.view.connect_btn.cget('text'), 'Connect')
 
     def test_invalid_config_leaves_current_workspace_intact(self):
         app = self.app
@@ -466,17 +466,17 @@ class GuiSerialTests(unittest.TestCase):
     @contextmanager
     def jog_session(self):
         app = self.app
-        app._on_keyrelease(SimpleNamespace(keysym='plus', widget=app.root))
-        self.pump_until(lambda: not app._blocked_step_keys)
+        app.shortcuts.on_keyrelease(SimpleNamespace(keysym='plus', widget=app.root))
+        self.pump_until(lambda: not app.shortcuts.blocked_step_keys)
         app._add_motor()
         app._select_mode(Config.MODE_STEP)
         app._select_only_motor(1)
         with patch.object(type(app.serial_manager), 'is_connected', new_callable=PropertyMock, return_value=True), \
                 patch.object(app.serial_manager, 'send', return_value=True) as send:
-            app._handle_step_keypress('down', 1)
-            app._cancel_step_key_hold_job()
-            app._start_step_jog()
-            self.assertTrue(app._step_key_is_jogging)
+            app.shortcuts.handle_step_keypress('down', 1)
+            app.shortcuts.cancel_step_key_hold_job()
+            app.shortcuts.start_step_jog()
+            self.assertTrue(app.shortcuts.step_key_is_jogging)
             send.reset_mock()
             yield send
 
@@ -490,29 +490,29 @@ class GuiSerialTests(unittest.TestCase):
             app.motor_states[0].is_selected = False
             app.motor_states[0].is_running = False
             app.motor_states[1].is_selected = True
-            app._finish_step_keyrelease()
+            app.shortcuts.finish_step_keyrelease()
             self.assertEqual(self.paused_ids(send), {1})
-            self.assertEqual(app._step_key_motor_ids, ())
-            self.assertNotIn(1, app._motion_targets)
+            self.assertEqual(app.shortcuts.step_key_motor_ids, ())
+            self.assertNotIn(1, app.motion.motion_targets)
 
     def test_digit_selection_during_jog_stops_old_drive_and_cancels_gesture(self):
         app = self.app
         with self.jog_session() as send:
-            app._on_keypress(SimpleNamespace(keysym='2', widget=app.root))
+            app.shortcuts.on_keypress(SimpleNamespace(keysym='2', widget=app.root))
             self.assertEqual(self.paused_ids(send), {1})
             self.assertTrue(app.motor_states[1].is_selected)
-            self.assertIsNone(app._active_step_key)
+            self.assertIsNone(app.shortcuts.active_step_key)
             send.reset_mock()
-            app._start_step_jog()
+            app.shortcuts.start_step_jog()
             send.assert_not_called()
 
     def test_checkbox_selection_change_stops_jog_owner(self):
         app = self.app
         with self.jog_session() as send:
-            app._motor_widgets[1]['selected_var'].set(True)
+            app.view.motor_widgets[1]['selected_var'].set(True)
             app._on_selection_change(2)
             self.assertEqual(self.paused_ids(send), {1})
-            self.assertFalse(app._step_key_is_jogging)
+            self.assertFalse(app.shortcuts.step_key_is_jogging)
 
     def test_jog_stops_on_focus_loss_text_focus_minimize_and_mode_change(self):
         app = self.app
@@ -520,26 +520,26 @@ class GuiSerialTests(unittest.TestCase):
             with self.subTest(trigger=trigger), self.jog_session() as send:
                 if trigger == 'focus_loss':
                     with patch.object(app.root, 'focus_get', return_value=None):
-                        app._check_jog_focus()
+                        app.shortcuts.check_jog_focus()
                 elif trigger == 'text':
-                    with patch.object(app.root, 'focus_get', return_value=app._step_size_entry), \
-                            patch.object(app._step_size_entry, 'cget', return_value='normal'):
-                        app._check_jog_focus()
+                    with patch.object(app.root, 'focus_get', return_value=app.view.step_size_entry), \
+                            patch.object(app.view.step_size_entry, 'cget', return_value='normal'):
+                        app.shortcuts.check_jog_focus()
                 elif trigger == 'minimize':
-                    app._on_jog_unmap(SimpleNamespace(widget=app.root))
+                    app.shortcuts.on_jog_unmap(SimpleNamespace(widget=app.root))
                 else:
                     app._select_mode(Config.MODE_TARGET)
                 self.assertEqual(self.paused_ids(send), {1})
-                self.assertIsNone(app._active_step_key)
-                self.assertFalse(app._step_key_is_jogging)
+                self.assertIsNone(app.shortcuts.active_step_key)
+                self.assertFalse(app.shortcuts.step_key_is_jogging)
 
     def test_release_received_in_another_window_is_not_ignored(self):
         app = self.app
         with self.jog_session() as send:
             other = tk.Toplevel(app.root)
             entry = tk.Entry(other)
-            app._on_keyrelease(SimpleNamespace(keysym='plus', widget=entry))
-            self.pump_until(lambda: app._active_step_key is None)
+            app.shortcuts.on_keyrelease(SimpleNamespace(keysym='plus', widget=entry))
+            self.pump_until(lambda: app.shortcuts.active_step_key is None)
             self.assertEqual(self.paused_ids(send), {1})
             other.destroy()
 
@@ -549,19 +549,19 @@ class GuiSerialTests(unittest.TestCase):
         app._select_only_motor(1)
         with patch.object(type(app.serial_manager), 'is_connected', new_callable=PropertyMock, return_value=True), \
                 patch.object(app.serial_manager, 'send', return_value=True) as send:
-            app._handle_step_keypress('down', 1)
+            app.shortcuts.handle_step_keypress('down', 1)
             with patch.object(app.root, 'focus_get', return_value=None):
-                app._check_jog_focus()
-            self.assertIsNone(app._step_key_hold_job)
+                app.shortcuts.check_jog_focus()
+            self.assertIsNone(app.shortcuts.step_key_hold_job)
             send.reset_mock()
-            app._start_step_jog()
+            app.shortcuts.start_step_jog()
             send.assert_not_called()
 
     def test_root_focus_out_binding_stops_jog(self):
         app = self.app
         with self.jog_session() as send, patch.object(app.root, 'focus_get', return_value=None):
             app.root.event_generate('<FocusOut>')
-            self.pump_until(lambda: app._active_step_key is None)
+            self.pump_until(lambda: app.shortcuts.active_step_key is None)
             self.assertEqual(self.paused_ids(send), {1})
 
     def test_release_near_hold_threshold_does_not_start_continuous_motion(self):
@@ -570,14 +570,14 @@ class GuiSerialTests(unittest.TestCase):
         app._select_only_motor(1)
         with patch.object(type(app.serial_manager), 'is_connected', new_callable=PropertyMock, return_value=True), \
                 patch.object(app.serial_manager, 'send', return_value=True) as send:
-            app._handle_step_keypress('down', 1)
-            app._cancel_step_key_hold_job()
-            app._handle_step_keyrelease('down')
+            app.shortcuts.handle_step_keypress('down', 1)
+            app.shortcuts.cancel_step_key_hold_job()
+            app.shortcuts.handle_step_keyrelease('down')
             send.reset_mock()
-            app._start_step_jog()
-            self.pump_until(lambda: app._active_step_key is None)
-            self.assertFalse(app._step_key_is_jogging)
-            self.assertIsNone(app._step_key_hold_job)
+            app.shortcuts.start_step_jog()
+            self.pump_until(lambda: app.shortcuts.active_step_key is None)
+            self.assertFalse(app.shortcuts.step_key_is_jogging)
+            self.assertIsNone(app.shortcuts.step_key_hold_job)
             send.assert_not_called()
 
     def test_stop_all_blocks_held_key_repeat_until_a_real_release(self):
@@ -587,15 +587,15 @@ class GuiSerialTests(unittest.TestCase):
             send.reset_mock()
             # Includes the release/press pairs generated by some Tk builds.
             for _ in range(3):
-                app._on_keyrelease(SimpleNamespace(keysym='plus', widget=app.root))
-                app._handle_step_keypress('down', 1)
+                app.shortcuts.on_keyrelease(SimpleNamespace(keysym='plus', widget=app.root))
+                app.shortcuts.handle_step_keypress('down', 1)
             send.assert_not_called()
-            self.assertIsNone(app._active_step_key)
-            app._on_keyrelease(SimpleNamespace(keysym='plus', widget=app.root))
-            self.pump_until(lambda: not app._blocked_step_keys)
-            app._handle_step_keypress('down', 1)
+            self.assertIsNone(app.shortcuts.active_step_key)
+            app.shortcuts.on_keyrelease(SimpleNamespace(keysym='plus', widget=app.root))
+            self.pump_until(lambda: not app.shortcuts.blocked_step_keys)
+            app.shortcuts.handle_step_keypress('down', 1)
             self.assertEqual(P.parse_response(send.call_args.args[0])[0], 'RUN')
-            app._reset_step_key_state()
+            app.shortcuts.reset_step_key_state()
 
     def test_stop_all_ignores_selection_running_flags_and_clears_motion(self):
         app = self.app
@@ -604,16 +604,16 @@ class GuiSerialTests(unittest.TestCase):
         app._select_only_motor(1)
         app.motor_states[0].is_running = False
         app._hidden_motor_states[2].instruction_status = 'running'
-        app._step_targets[2] = 40
-        app._motion_targets[1] = 30
+        app.motion.step_targets[2] = 40
+        app.motion.motion_targets[1] = 30
         with patch.object(app.serial_manager, 'send', return_value=True) as send:
             for mode in (Config.MODE_TARGET, Config.MODE_STEP, Config.MODE_PROGRAM):
                 app._select_mode(mode)
                 send.reset_mock()
-                app._stop_all_btn.invoke()
+                app.view.stop_all_btn.invoke()
                 self.assertEqual(P.parse_response(send.call_args_list[0].args[0])[0], 'PAUSE_ALL')
-        self.assertEqual(app._step_targets, {})
-        self.assertEqual(app._motion_targets, {})
+        self.assertEqual(app.motion.step_targets, {})
+        self.assertEqual(app.motion.motion_targets, {})
         self.assertEqual(app._hidden_motor_states[2].instruction_status, 'paused')
 
     def test_hidden_drive_preserves_state_receives_final_position_and_survives_restart(self):
@@ -661,12 +661,12 @@ class GuiSerialTests(unittest.TestCase):
                 patch.object(app.serial_manager, 'send', return_value=True) as send:
             for mode in (Config.MODE_TARGET, Config.MODE_STEP, Config.MODE_PROGRAM):
                 app._select_mode(mode)
-                frame = {Config.MODE_TARGET: app._target_controls_frame,
-                         Config.MODE_STEP: app._step_controls_frame,
-                         Config.MODE_PROGRAM: app._program_controls_frame}[mode]
+                frame = {Config.MODE_TARGET: app.view.target_controls_frame,
+                         Config.MODE_STEP: app.view.step_controls_frame,
+                         Config.MODE_PROGRAM: app.view.program_controls_frame}[mode]
                 buttons = [button for group in frame.winfo_children() for button in group.winfo_children()
                            if button.cget('text') in ('Run Selected', 'Step Up', 'Step Down')]
-                for widget in [app.root, app._motor_widgets[0]['absolute_entry'], *buttons]:
+                for widget in [app.root, app.view.motor_widgets[0]['absolute_entry'], *buttons]:
                     widget.focus_force()
                     app.root.update()
                     for key in ('Return', 'KP_Enter'):
@@ -680,8 +680,8 @@ class GuiSerialTests(unittest.TestCase):
                             app.root.update()
             send.assert_not_called()
             app._enable_absolute_edit(1)
-            entry = app._motor_widgets[0]['absolute_entry']
-            app._motor_widgets[0]['absolute_var'].set('3.125')
+            entry = app.view.motor_widgets[0]['absolute_entry']
+            app.view.motor_widgets[0]['absolute_var'].set('3.125')
             entry.focus_force()
             entry.event_generate('<Return>')
             app.root.update()
@@ -695,12 +695,12 @@ class GuiSerialTests(unittest.TestCase):
         with patch.object(app, '_on_run') as run:
             for mode in (Config.MODE_TARGET, Config.MODE_PROGRAM, Config.MODE_STEP):
                 app._select_mode(mode)
-                frame = {Config.MODE_TARGET: app._target_controls_frame,
-                         Config.MODE_STEP: app._step_controls_frame,
-                         Config.MODE_PROGRAM: app._program_controls_frame}[mode]
+                frame = {Config.MODE_TARGET: app.view.target_controls_frame,
+                         Config.MODE_STEP: app.view.step_controls_frame,
+                         Config.MODE_PROGRAM: app.view.program_controls_frame}[mode]
                 buttons = [button for group in frame.winfo_children() for button in group.winfo_children()
                            if button.cget('text') in ('Run Selected', 'Step Up', 'Step Down')]
-                for widget in [app.root, app._motor_widgets[0]['absolute_entry'], *buttons]:
+                for widget in [app.root, app.view.motor_widgets[0]['absolute_entry'], *buttons]:
                     widget.focus_force()
                     app.root.update()
                     modifier = 'Command' if app.root.tk.call('tk', 'windowingsystem') == 'aqua' else 'Control'
@@ -734,9 +734,9 @@ class GuiSerialTests(unittest.TestCase):
         with patch.object(app, '_on_run') as run:
             for state in (0, 1, 2, 8, 16, 128):
                 if not state & required:
-                    app._on_run_shortcut(SimpleNamespace(state=state))
+                    app.shortcuts.on_run_shortcut(SimpleNamespace(state=state))
             run.assert_not_called()
-            app._on_run_shortcut(SimpleNamespace(state=required))
+            app.shortcuts.on_run_shortcut(SimpleNamespace(state=required))
             run.assert_called_once_with()
 
     def test_compact_view_shrinks_six_drive_console_and_restores_full_size(self):
@@ -747,51 +747,51 @@ class GuiSerialTests(unittest.TestCase):
         app.root.update()
         full_width = app.root.winfo_width()
         for _ in range(2):
-            app._set_compact_view(True)
+            app.view.set_compact_view(True)
             app.root.update()
-            self.assertTrue(app._compact_frame.winfo_ismapped())
-            self.assertFalse(app._full_console_frame.winfo_ismapped())
-            self.assertEqual(len(app._compact_widgets), 6)
+            self.assertTrue(app.view.compact_frame.winfo_ismapped())
+            self.assertFalse(app.view.full_console_frame.winfo_ismapped())
+            self.assertEqual(len(app.view.compact_widgets), 6)
             self.assertLessEqual(app.root.winfo_width(), 400)
             self.assertLessEqual(app.root.winfo_height(), 400)
-            self.assertTrue(app._compact_pause_all_btn.winfo_ismapped())
-            app._set_compact_view(False)
+            self.assertTrue(app.view.compact_pause_all_btn.winfo_ismapped())
+            app.view.set_compact_view(False)
             app.root.update()
-            self.assertTrue(app._full_console_frame.winfo_ismapped())
-            self.assertFalse(app._compact_frame.winfo_ismapped())
+            self.assertTrue(app.view.full_console_frame.winfo_ismapped())
+            self.assertFalse(app.view.compact_frame.winfo_ismapped())
             self.assertGreaterEqual(app.root.winfo_width(), full_width)
 
     def test_compact_readouts_share_live_position_variables_and_pause_all(self):
         app = self.app
         app._add_motor()
-        app._set_compact_view(True)
+        app.view.set_compact_view(True)
         app.motor_states[1].relative_zero_point = 3
         app._on_position_update(2, 5.125)
-        readouts = app._compact_widgets[2]
+        readouts = app.view.compact_widgets[2]
         self.assertEqual(app.root.getvar(readouts['absolute'].cget('textvariable')), '5.125')
         self.assertEqual(app.root.getvar(readouts['relative'].cget('textvariable')), '2.125')
         with patch.object(app.serial_manager, 'send', return_value=True) as send:
-            app._compact_pause_all_btn.invoke()
+            app.view.compact_pause_all_btn.invoke()
             self.assertEqual(P.parse_response(send.call_args.args[0])[0], 'PAUSE_ALL')
             send.reset_mock()
-            app._on_pause_shortcut(SimpleNamespace())
+            app.shortcuts.on_pause_shortcut(SimpleNamespace())
             self.assertEqual(P.parse_response(send.call_args.args[0])[0], 'PAUSE_ALL')
 
     def test_compact_view_blocks_run_and_jog_shortcuts_and_cancels_current_jog(self):
         app = self.app
         with self.jog_session() as send:
-            app._set_compact_view(True)
+            app.view.set_compact_view(True)
             self.assertEqual(self.paused_ids(send), {1})
-            self.assertIsNone(app._active_step_key)
+            self.assertIsNone(app.shortcuts.active_step_key)
             send.reset_mock()
-            app._on_keypress(SimpleNamespace(keysym='plus', widget=app.root))
+            app.shortcuts.on_keypress(SimpleNamespace(keysym='plus', widget=app.root))
             send.assert_not_called()
         required = 8 if app.root.tk.call('tk', 'windowingsystem') == 'aqua' else 4
         with patch.object(app, '_on_run') as run:
             app._select_mode(Config.MODE_TARGET)
-            app._on_run_shortcut(SimpleNamespace(state=required))
+            app.shortcuts.on_run_shortcut(SimpleNamespace(state=required))
             run.assert_not_called()
-        self.assertTrue(app._compact_active)
+        self.assertTrue(app.view.compact_active)
 
     def test_compact_view_preserves_running_program_and_returns_to_its_mode(self):
         app = self.app
@@ -802,27 +802,27 @@ class GuiSerialTests(unittest.TestCase):
         state.instruction_status = 'running'
         with patch.object(type(app.serial_manager), 'is_connected', new_callable=PropertyMock, return_value=True), \
                 patch.object(app.serial_manager, 'send', return_value=True) as send:
-            app._set_compact_view(True)
+            app.view.set_compact_view(True)
             self.assertTrue(state.is_running)
             app._on_position_update(1, 1)
             self.assertEqual(state.instruction_index, 1)
             self.assertEqual(P.parse_response(send.call_args.args[0])[0], 'RUN')
-            self.assertEqual(app.root.getvar(app._compact_widgets[1]['absolute'].cget('textvariable')), '1.000')
-            app._set_compact_view(False)
-            self.assertEqual(app._mode_var.get(), Config.MODE_PROGRAM)
+            self.assertEqual(app.root.getvar(app.view.compact_widgets[1]['absolute'].cget('textvariable')), '1.000')
+            app.view.set_compact_view(False)
+            self.assertEqual(app.view.mode_var.get(), Config.MODE_PROGRAM)
             self.assertTrue(state.is_running)
 
     def test_compact_view_persists_in_configs_and_automatic_restore(self):
         app = self.app
-        app._set_compact_view(True)
+        app.view.set_compact_view(True)
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / 'compact.json'
             write_config(path, app._workspace_snapshot())
             saved = read_config(path)
             self.assertTrue(saved['compact_view'])
-            app._set_compact_view(False)
+            app.view.set_compact_view(False)
             app._apply_workspace(saved)
-            self.assertTrue(app._compact_active)
+            self.assertTrue(app.view.compact_active)
             automatic = Path(folder) / 'automatic.json'
             with patch.object(app, '_get_data_path', return_value=automatic):
                 self.patches[1].temp_original(app)
@@ -834,71 +834,71 @@ class GuiSerialTests(unittest.TestCase):
         app = self.app
         app._add_motor()
         app._select_only_motor(1)
-        app._motor_widgets[1]['speed_var'].set('.01')
-        app._motor_widgets[1]['target_var'].set('5.125')
-        app._set_compact_view(True)
-        app._compact_widgets[1]['selection'].invoke()
-        app._compact_widgets[2]['selection'].invoke()
+        app.view.motor_widgets[1]['speed_var'].set('.01')
+        app.view.motor_widgets[1]['target_var'].set('5.125')
+        app.view.set_compact_view(True)
+        app.view.compact_widgets[1]['selection'].invoke()
+        app.view.compact_widgets[2]['selection'].invoke()
         self.assertFalse(app.motor_states[0].is_selected)
         self.assertTrue(app.motor_states[1].is_selected)
         with patch.object(type(app.serial_manager), 'is_connected', new_callable=PropertyMock, return_value=True), \
                 patch.object(app.serial_manager, 'send', return_value=True) as send:
-            app._compact_run_btn.invoke()
+            app.view.compact_run_btn.invoke()
             name, args = P.parse_response(send.call_args.args[0])
             self.assertEqual(name, 'RUN')
             self.assertEqual(int(args[0]), 2)
             self.assertEqual(float(args[2]), 5.125)
-        self.assertTrue(app._compact_active)
+        self.assertTrue(app.view.compact_active)
 
     def test_compact_run_program_and_step_mode_state(self):
         app = self.app
         app._select_only_motor(1)
         app.motor_states[0].instructions = [InstructionStep(3, .01)]
         app._select_mode(Config.MODE_PROGRAM)
-        app._set_compact_view(True)
+        app.view.set_compact_view(True)
         with patch.object(type(app.serial_manager), 'is_connected', new_callable=PropertyMock, return_value=True), \
                 patch.object(app.serial_manager, 'send', return_value=True) as send:
-            app._compact_run_btn.invoke()
+            app.view.compact_run_btn.invoke()
             self.assertEqual(float(P.parse_response(send.call_args.args[0])[1][2]), 3)
             app._on_stop_all()
             app._select_mode(Config.MODE_STEP)
             send.reset_mock()
-            app._compact_run_btn.invoke()
+            app.view.compact_run_btn.invoke()
             send.assert_not_called()
-            self.assertTrue(app._compact_run_btn.instate(['disabled']))
+            self.assertTrue(app.view.compact_run_btn.instate(['disabled']))
             app._select_mode(Config.MODE_TARGET)
-            self.assertFalse(app._compact_run_btn.instate(['disabled']))
+            self.assertFalse(app.view.compact_run_btn.instate(['disabled']))
 
     def test_compact_run_cannot_be_activated_by_enter(self):
         app = self.app
         app._select_only_motor(1)
-        app._motor_widgets[0]['speed_var'].set('.01')
-        app._motor_widgets[0]['target_var'].set('5')
-        app._set_compact_view(True)
+        app.view.motor_widgets[0]['speed_var'].set('.01')
+        app.view.motor_widgets[0]['target_var'].set('5')
+        app.view.set_compact_view(True)
         app.root.deiconify()
-        app._compact_run_btn.focus_force()
+        app.view.compact_run_btn.focus_force()
         app.root.update()
         with patch.object(type(app.serial_manager), 'is_connected', new_callable=PropertyMock, return_value=True), \
                 patch.object(app.serial_manager, 'send', return_value=True) as send:
             for state in (0, 4, 8, 16):
-                app._compact_run_btn.event_generate('<KeyPress-Return>', state=state)
-                app._compact_run_btn.event_generate('<KeyRelease-Return>', state=state)
+                app.view.compact_run_btn.event_generate('<KeyPress-Return>', state=state)
+                app.view.compact_run_btn.event_generate('<KeyRelease-Return>', state=state)
                 app.root.update()
             send.assert_not_called()
 
     def test_positions_and_disconnect_update_gui(self):
         self.app._on_connect()
-        self.pump_until(lambda: self.app._connect_btn.cget('text') == 'Disconnect')
+        self.pump_until(lambda: self.app.view.connect_btn.cget('text') == 'Disconnect')
         port = self.ports[-1]
         port.inject(P.create_command('POS', 1, 2.5))
         self.pump_until(lambda: self.app.motor_states[0].absolute == 2.5)
         self.app._on_connect()
-        self.pump_until(lambda: self.app._connect_btn.cget('text') == 'Connect')
+        self.pump_until(lambda: self.app.view.connect_btn.cget('text') == 'Connect')
         self.assertTrue(port.closed)
 
     def test_gui_freeze_pauses_program_and_does_not_resume(self):
         self.app._on_connect()
-        self.pump_until(lambda: self.app._connect_btn.cget('text') == 'Disconnect')
+        self.pump_until(lambda: self.app.view.connect_btn.cget('text') == 'Disconnect')
         state = self.app.motor_states[0]
         state.is_running = True
         state.instruction_status = 'running'
@@ -910,7 +910,7 @@ class GuiSerialTests(unittest.TestCase):
 
     def test_close_waits_asynchronously_for_final_stop(self):
         self.app._on_connect()
-        self.pump_until(lambda: self.app._connect_btn.cget('text') == 'Disconnect')
+        self.pump_until(lambda: self.app.view.connect_btn.cget('text') == 'Disconnect')
         port = self.ports[-1]
         port.block_command = 'RUN'
         self.app.serial_manager.send(P.cmd_run(1, .01, 1, 0))

@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Optional, Callable
 
 import tkinter as tk
-from tkinter import ttk, messagebox, filedialog, font as tkfont
+from tkinter import messagebox, filedialog
 
 # Configure logging
 logging.basicConfig(
@@ -30,10 +30,13 @@ logger = logging.getLogger(__name__)
 
 
 from monkeydrive.config import Config
+from monkeydrive.console_view import ConsoleView
+from monkeydrive.console_shortcuts import ConsoleShortcuts
 from monkeydrive.configuration import atomic_write_json, read_config, write_config
 from monkeydrive.console_theme import ConsoleTheme as Theme
 from monkeydrive.dialogs import InstructionsWindow, NotesWindow, ProgramLoadWindow, SettingsWindow
 from monkeydrive.models import InstructionStep, MotorState, TrajectoryState
+from monkeydrive.motion_controller import MotionController, MotionError, TargetMove
 from monkeydrive.protocol import SerialProtocol
 from monkeydrive.serial_manager import SerialManager
 from monkeydrive.utils import format_mm
@@ -46,18 +49,21 @@ from monkeydrive.viewer_tasks import LatestWorker
 # =============================================================================
 
 class MonkeyDriveApp:
-    """Main MonkeyDrive GUI application."""
+    """Coordinate drive state, controller commands, persistence, and viewers.
+
+    ConsoleView owns presentation; ConsoleShortcuts owns keyboard gestures.
+    MotionController owns movement rules and programs. SerialManager owns device
+    I/O; this class routes their notifications and user actions on Tk's thread.
+    """
 
     def __init__(self):
         """Initialize the MonkeyDrive application."""
         self._root = tk.Tk()
         self._root.title(Config.WINDOW_TITLE)
-        self._configure_light_theme()
 
         # State
         self._motor_states: list = []
         self._hidden_motor_states: dict[int, MotorState] = {}
-        self._motor_widgets: list = []
         self._notes_windows: dict = {}
         self._trajectory_windows: dict = {}
         self._trajectory_revisions: dict[int, int] = {}
@@ -66,8 +72,6 @@ class MonkeyDriveApp:
         self._probe_summary_window: Optional[JsonViewerProcess] = None
         self._saved_mode: str = Config.MODE_TARGET
         self._saved_compact_view = False
-        self._compact_active = False
-        self._full_console_size = None
         self._saved_port: str = ""
         self._saved_step_speed: float = Config.DEFAULT_STEP_SPEED
         self._saved_step_size: float = Config.DEFAULT_STEP_SIZE
@@ -79,17 +83,6 @@ class MonkeyDriveApp:
         self._min_speed: float = Config.MIN_SPEED
         self._max_speed: float = Config.MAX_SPEED
         self._backlash: float = Config.DEFAULT_BACKLASH_MM
-        self._step_targets: dict = {}
-        self._motion_targets: dict[int, float] = {}
-        self._active_step_key: Optional[str] = None
-        self._active_step_direction: int = 0
-        self._step_key_motor_ids = ()
-        self._blocked_step_keys = set()
-        self._step_unblock_jobs = {}
-        self._focus_check_job = None
-        self._step_key_is_jogging: bool = False
-        self._step_key_hold_job = None
-        self._step_key_release_job = None
         self._closing = False
         self._config_worker = None
         self._config_busy = False
@@ -103,31 +96,27 @@ class MonkeyDriveApp:
             on_connected=self._on_connected,
         )
 
-        # GUI variables (initialized in _build_ui)
-        self._port_var: Optional[tk.StringVar] = None
-        self._port_combo: Optional[ttk.Combobox] = None
-        self._connect_btn: Optional[tk.Button] = None
-        self._mode_var: Optional[tk.StringVar] = None
-        self._mode_buttons: dict[str, tk.Button] = {}
-        self._step_speed_var: Optional[tk.StringVar] = None
-        self._step_size_var: Optional[tk.StringVar] = None
-        self._step_speed_entry: Optional[tk.Entry] = None
-        self._step_size_entry: Optional[tk.Entry] = None
-        self._target_controls_frame: Optional[tk.Frame] = None
-        self._step_controls_frame: Optional[tk.Frame] = None
-        self._step_settings_frame: Optional[tk.Frame] = None
-        self._program_controls_frame: Optional[tk.Frame] = None
+        # Movement rules receive plain models and values, never Tk widgets.
+        self.motion = MotionController(
+            send=lambda command: self._serial_manager.send(command),
+            connected=lambda: self._serial_manager.is_connected,
+            on_target_parsed=self._format_target_input,
+            on_instruction_activated=self._on_program_instruction_activated,
+            on_program_changed=lambda state: self._update_program_row(state.motor_id),
+        )
+
+        # Dialog and viewer handles
         self._settings_window: Optional[SettingsWindow] = None
         self._anatomy_window: Optional[JsonViewerProcess] = None
-        self._trajectory_summary_btn: Optional[tk.Button] = None
-        self._motors_container: Optional[tk.Frame] = None
 
         # Load saved state
         self._load_state()
 
-        # Build UI
-        self._build_ui()
-        self._bind_keyboard_shortcuts()
+        # The view owns Tk widgets; application callbacks own behavior.
+        self.view = ConsoleView(self._root, self)
+        self.shortcuts = ConsoleShortcuts(self._root, self)
+        self.view.build()
+        self.shortcuts.bind()
 
         # Ensure at least one motor
         if len(self._motor_states) == 0:
@@ -135,11 +124,11 @@ class MonkeyDriveApp:
         else:
             self._rebuild_motor_rows()
 
-        self._style_widget_tree()
-        self._set_compact_view(self._saved_compact_view, remember=False)
+        self.view.style_widget_tree()
+        self.view.set_compact_view(self._saved_compact_view, remember=False)
 
         # Keep the console usable with platform font and display scaling.
-        self._fit_window_to_content()
+        self.view.fit_window_to_content()
         self._root.resizable(True, True)
 
         # Start auto-save timer
@@ -169,781 +158,35 @@ class MonkeyDriveApp:
         """Start the main event loop."""
         self._root.mainloop()
 
-    def _configure_light_theme(self):
-        """Force readable colors on older macOS Tk builds."""
-        for option, value in (
-            ("*Background", Theme.COLOR_BG),
-            ("*Foreground", Theme.COLOR_FG),
-            ("*Entry.Background", Theme.COLOR_ENTRY_BG),
-            ("*Entry.Foreground", Theme.COLOR_FG),
-            ("*Text.Background", Theme.COLOR_ENTRY_BG),
-            ("*Text.Foreground", Theme.COLOR_FG),
-            ("*Button.Background", Theme.COLOR_ENTRY_BG),
-            ("*Button.Foreground", Theme.COLOR_FG),
-        ):
-            self._root.option_add(option, value)
-
-        self._root.tk_setPalette(
-            background=Theme.COLOR_BG,
-            foreground=Theme.COLOR_FG,
-            activeBackground=Theme.COLOR_ACTIVE_BG,
-            activeForeground=Theme.COLOR_FG,
-            highlightColor=Theme.COLOR_SELECT_BG,
-            selectBackground=Theme.COLOR_SELECT_BG,
-            selectForeground=Theme.COLOR_ENTRY_BG,
-        )
-        self._root.configure(background=Theme.COLOR_BG)
-
-        self._console_font = tkfont.nametofont("TkDefaultFont").copy()
-        self._console_font.configure(size=11)
-        self._readout_font = self._console_font.copy()
-        self._readout_font.configure(size=13, weight="bold")
-        self._root.option_add("*Font", self._console_font)
-        style = ttk.Style(self._root)
-        try:
-            style.theme_use("clam")
-        except tk.TclError:
-            pass
-        style.configure(
-            "TCombobox",
-            font=self._console_font,
-            fieldbackground=Theme.COLOR_ENTRY_BG,
-            background=Theme.COLOR_ENTRY_BG,
-            foreground=Theme.COLOR_FG,
-            selectbackground=Theme.COLOR_SELECT_BG,
-            selectforeground=Theme.COLOR_ENTRY_BG,
-        )
-
-        style.configure("Console.TButton", font=self._console_font, padding=(10, 6), background="#ffffff",
-                        foreground=Theme.COLOR_FG, bordercolor="#dce2e9", relief="flat")
-        style.map("Console.TButton", background=[("active", "#eaf1fa")],
-                  foreground=[("disabled", "#929ba7")])
-        style.configure("Primary.Console.TButton", background="#225da8", foreground="white")
-        style.map("Primary.Console.TButton", background=[("active", "#194b89")],
-                  foreground=[("disabled", "#b7c6da"), ("!disabled", "white")])
-        style.configure("Pause.Console.TButton", foreground="#a52d36")
-        style.configure("Selected.Console.TButton", background="#eaf1fa", foreground="#225da8")
-        style.configure("Console.TLabel", font=self._console_font, background=Theme.COLOR_BG, foreground="#626e7d")
-        style.configure('Compact.Readout.TLabel', background=Theme.COLOR_BG, foreground=Theme.COLOR_FG,
-                        font=(self._console_font.actual('family'), 11, 'bold'))
-        style.configure("Title.Console.TLabel", font=(self._console_font.actual("family"), 26, "bold"),
-                        foreground=Theme.COLOR_FG)
-
-    def _style_widget_tree(self, widget=None):
-        """Apply explicit colors to Tk widgets that may ignore the app palette."""
-        widget = widget or self._root
-
-        try:
-            if isinstance(widget, (tk.Tk, tk.Toplevel, tk.Frame)):
-                widget.configure(background=Theme.COLOR_BG)
-            elif isinstance(widget, tk.Label):
-                if getattr(widget, "_monkeydrive_role", "") not in ("mode_tab", "motion_status"):
-                    widget.configure(background=Theme.COLOR_BG, foreground=Theme.COLOR_FG)
-            elif isinstance(widget, tk.Checkbutton):
-                widget.configure(
-                    background=Theme.COLOR_BG,
-                    foreground=Theme.COLOR_FG,
-                    activebackground=Theme.COLOR_ACTIVE_BG,
-                    activeforeground=Theme.COLOR_FG,
-                    selectcolor=Theme.COLOR_ENTRY_BG,
-                )
-            elif isinstance(widget, tk.Radiobutton):
-                widget.configure(
-                    background=Theme.COLOR_BG,
-                    foreground=Theme.COLOR_FG,
-                    activebackground=Theme.COLOR_ACTIVE_BG,
-                    activeforeground=Theme.COLOR_FG,
-                    selectcolor=Theme.COLOR_ENTRY_BG,
-                )
-            elif isinstance(widget, tk.Button):
-                role = getattr(widget, "_monkeydrive_role", "")
-                if role == "mode":
-                    pass
-                else:
-                    widget.configure(
-                        background=Theme.COLOR_ENTRY_BG,
-                        foreground=Theme.COLOR_FG,
-                        activebackground=Theme.COLOR_ACTIVE_BG,
-                        activeforeground=Theme.COLOR_FG,
-                        highlightbackground=Theme.COLOR_BG,
-                        borderwidth=1,
-                    )
-            elif isinstance(widget, tk.Entry):
-                readonly_bg = widget.cget("readonlybackground")
-                widget.configure(
-                    background=Theme.COLOR_ENTRY_BG,
-                    foreground=Theme.COLOR_FG,
-                    insertbackground=Theme.COLOR_FG,
-                    readonlybackground=readonly_bg or Theme.COLOR_READONLY_BG,
-                    disabledforeground=Theme.COLOR_FG,
-                    relief="flat", borderwidth=0, highlightthickness=1,
-                    highlightbackground="#dce2e9", highlightcolor="#225da8",
-                )
-            elif isinstance(widget, tk.Text):
-                widget.configure(
-                    background=Theme.COLOR_ENTRY_BG,
-                    foreground=Theme.COLOR_FG,
-                    insertbackground=Theme.COLOR_FG,
-                )
-        except tk.TclError:
-            pass
-
-        for child in widget.winfo_children():
-            self._style_widget_tree(child)
-
-        if widget is self._root:
-            self._refresh_mode_buttons()
-            for state, row in zip(self._motor_states, self._motor_widgets):
-                self._apply_row_selection_style(row, state.is_selected)
-
-    def _fit_window_to_content(self):
-        """Fit mode contents while preserving space the user has added."""
-        self._root.update_idletasks()
-        width = max(260 if self._compact_active else 980, self._root.winfo_reqwidth())
-        height = self._root.winfo_reqheight()
-        self._root.minsize(width, height)
-        if self._compact_active:
-            self._root.geometry(f'{width}x{height}')
-        else:
-            self._root.geometry(f"{max(width, self._root.winfo_width())}x{max(height, self._root.winfo_height())}")
-
-    def _build_ui(self):
-        menu = tk.Menu(self._root)
-        self._config_menu = tk.Menu(menu, tearoff=False)
-        self._config_menu.add_command(label='Save Config…', command=self._on_save_config)
-        self._config_menu.add_command(label='Load Config…', command=self._on_load_config)
-        menu.add_cascade(label='File', menu=self._config_menu)
-        self._compact_view_var = tk.BooleanVar(self._root, value=self._saved_compact_view)
-        view_menu = tk.Menu(menu, tearoff=False)
-        view_menu.add_checkbutton(label='Compact View', variable=self._compact_view_var,
-                                  command=self._set_compact_view)
-        menu.add_cascade(label='View', menu=view_menu)
-        self._root.configure(menu=menu)
-        main = tk.Frame(self._root, padx=24, pady=20)
-        self._full_console_frame = main
-        main.pack(fill=tk.BOTH, expand=True)
-        header = tk.Frame(main)
-        header.pack(fill=tk.X, pady=(0, 22))
-        # Override the application-wide *Font option, which takes precedence over ttk styles.
-        ttk.Label(header, text="MonkeyDrive", style="Title.Console.TLabel",
-                  font=(self._console_font.actual("family"), 26, "bold")).pack(side=tk.LEFT)
-        self._build_port_selection(header)
-        toolbar = tk.Frame(main)
-        toolbar.pack(fill=tk.X, pady=(0, 16))
-        self._mode_toolbar = tk.Frame(toolbar)
-        self._mode_toolbar.pack(side=tk.LEFT)
-        utilities = tk.Frame(toolbar)
-        utilities.pack(side=tk.RIGHT)
-        self._build_utility_buttons(utilities)
-        self._step_options = tk.Frame(main)
-        self._step_options.pack(fill=tk.X)
-        ttk.Separator(main).pack(fill=tk.X)
-        self._motors_container = tk.Frame(main, pady=8)
-        self._motors_container.pack(fill=tk.BOTH, expand=True)
-        ttk.Separator(main).pack(fill=tk.X, pady=(12, 12))
-        footer = tk.Frame(main)
-        footer.pack(fill=tk.X)
-        self._selection_text = tk.StringVar(value="")
-        actions = tk.Frame(footer)
-        actions.pack(fill=tk.X)
-        self._build_control_buttons(actions)
-        pause_all_row = tk.Frame(footer)
-        pause_all_row.pack(fill=tk.X)
-        self._stop_all_btn = ttk.Button(pause_all_row, text='Pause All', command=self._on_stop_all,
-                                        style='Pause.Console.TButton', width=13)
-        self._stop_all_btn.pack(pady=(8, 4))
-        self._build_compact_view()
-
-    def _build_compact_view(self):
-        self._compact_frame = tk.Frame(self._root, padx=12, pady=10)
-        header = tk.Frame(self._compact_frame)
-        header.pack(fill=tk.X, pady=(0, 4))
-        tk.Label(header, text='MonkeyDrive', font=(self._console_font.actual('family'), 13, 'bold')).pack(side=tk.LEFT)
-        ttk.Button(header, text='Expand', command=lambda: self._set_compact_view(False),
-                   style='Console.TButton', width=7).pack(side=tk.RIGHT)
-        status = tk.Frame(self._compact_frame)
-        status.pack(fill=tk.X, pady=(0, 8))
-        ttk.Label(status, textvariable=self._connection_text, style='Console.TLabel').pack(side=tk.LEFT)
-        ttk.Label(status, textvariable=self._mode_var, style='Console.TLabel').pack(side=tk.RIGHT)
-        self._compact_table = tk.Frame(self._compact_frame)
-        self._compact_table.pack(fill=tk.BOTH, expand=True)
-        self._compact_widgets = {}
-        actions = tk.Frame(self._compact_frame)
-        actions.pack(fill=tk.X, pady=(10, 0))
-        self._compact_run_btn = ttk.Button(actions, text='Run Selected', command=self._on_run,
-            style='Primary.Console.TButton', state='disabled' if self._is_step_mode() else 'normal')
-        self._compact_run_btn.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4))
-        self._compact_run_btn.bind('<Return>', lambda _event: 'break')
-        self._compact_run_btn.bind('<KP_Enter>', lambda _event: 'break')
-        self._compact_run_btn.bind('<KeyRelease-Return>', lambda _event: 'break')
-        self._compact_run_btn.bind('<KeyRelease-KP_Enter>', lambda _event: 'break')
-        self._compact_pause_all_btn = ttk.Button(actions, text='Pause All',
-            command=self._on_stop_all, style='Pause.Console.TButton')
-        self._compact_pause_all_btn.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(4, 0))
-
-    def _rebuild_compact_rows(self):
-        for child in self._compact_table.winfo_children():
-            child.destroy()
-        self._compact_widgets.clear()
-        for column, label in enumerate(('Drive', 'Abs (mm)', 'Rel (mm)')):
-            ttk.Label(self._compact_table, text=label, style='Console.TLabel', anchor='center').grid(
-                row=0, column=column, sticky='ew', padx=5, pady=(0, 5))
-            self._compact_table.grid_columnconfigure(column, weight=1)
-        for row, (state, widgets) in enumerate(zip(self._motor_states, self._motor_widgets), 1):
-            selection = tk.Checkbutton(self._compact_table, text=str(state.motor_id),
-                variable=widgets['selected_var'], command=lambda mid=state.motor_id: self._on_selection_change(mid),
-                background=Theme.COLOR_BG, activebackground=Theme.COLOR_BG, selectcolor=Theme.COLOR_ENTRY_BG)
-            selection.grid(
-                row=row, column=0, sticky='ew', padx=5, pady=3)
-            values = {'selection': selection}
-            for column, name in enumerate(('absolute', 'relative'), 1):
-                label = ttk.Label(self._compact_table, textvariable=widgets[f'{name}_var'],
-                                  style='Compact.Readout.TLabel', anchor='center', width=8)
-                label.grid(row=row, column=column, sticky='ew', padx=5, pady=3)
-                values[name] = label
-            self._compact_widgets[state.motor_id] = values
-
-    def _set_compact_view(self, compact=None, remember=True):
-        compact = self._compact_view_var.get() if compact is None else bool(compact)
-        self._compact_view_var.set(compact)
-        if compact == self._compact_active:
-            return
-        self._reset_step_key_state()
-        if compact:
-            self._full_console_size = (self._root.winfo_width(), self._root.winfo_height())
-            if self._root.state() == 'zoomed':
-                self._root.state('normal')
-            self._full_console_frame.pack_forget()
-            self._compact_frame.pack(fill=tk.BOTH, expand=True)
-        else:
-            self._compact_frame.pack_forget()
-            self._full_console_frame.pack(fill=tk.BOTH, expand=True)
-        self._compact_active = compact
-        self._root.minsize(1, 1)
-        if not compact and self._full_console_size:
-            self._root.geometry(f'{self._full_console_size[0]}x{self._full_console_size[1]}')
-        self._fit_window_to_content()
-        self._root.focus_set()
-        if remember:
-            self._save_state()
-
-    def _build_port_selection(self, parent):
-        connection = tk.Frame(parent)
-        connection.pack(side=tk.RIGHT)
-        self._connection_text = tk.StringVar(value="Disconnected")
-        ttk.Label(connection, textvariable=self._connection_text, style="Console.TLabel").pack(side=tk.LEFT, padx=(0, 12))
-        self._port_var = tk.StringVar(value=self._saved_port)
-        self._port_combo = ttk.Combobox(connection, textvariable=self._port_var, width=24, state="readonly")
-        if self._saved_port:
-            self._port_combo["values"] = [self._saved_port]
-        self._port_combo.pack(side=tk.LEFT, padx=(0, 8))
-        self._port_combo.bind("<Button-1>", self._refresh_ports)
-        self._connect_btn = ttk.Button(connection, text="Connect", command=self._on_connect, style="Console.TButton")
-        self._connect_btn.pack(side=tk.LEFT)
-
-    def _build_utility_buttons(self, parent):
-        for label, command in (("Anatomy", self._on_anatomy),
-                               ("Trajectories", self._on_trajectory_summary),
-                               ("Probes", self._on_probe_summary),
-                               ("Settings", self._on_settings)):
-            button = ttk.Button(parent, text=label, command=command, style="Console.TButton")
-            button.pack(side=tk.LEFT, padx=(5, 0))
-            if label == "Trajectories":
-                self._trajectory_summary_btn = button
-                button.configure(state=tk.NORMAL if self._has_loaded_anatomy() else tk.DISABLED)
-
-    def _build_control_buttons(self, parent: tk.Frame):
-        """Build the main control buttons."""
-        mode_frame = self._mode_toolbar
-
-        self._mode_var = tk.StringVar(value=self._saved_mode)
-        self._mode_buttons = {}
-        for label, value in (
-            ("Target", Config.MODE_TARGET),
-            ("Step", Config.MODE_STEP),
-            ("Program", Config.MODE_PROGRAM),
-        ):
-            button = ttk.Button(mode_frame, text=label, width=9,
-                                command=lambda mode=value: self._select_mode(mode),
-                                style="Console.TButton")
-            button.pack(side=tk.LEFT)
-            self._mode_buttons[value] = button
-        self._refresh_mode_buttons()
-
-        self._step_settings_frame = tk.Frame(self._step_options)
-        self._step_settings_frame.pack(pady=(0, 10))
-
-        self._step_speed_var = tk.StringVar(value=f"{self._saved_step_speed:g}")
-        self._step_size_var = tk.StringVar(value=format_mm(self._saved_step_size))
-
-        tk.Label(self._step_settings_frame, text="Step speed (mm/s):").pack(side=tk.LEFT, padx=(0, 5))
-        step_speed_entry = tk.Entry(
-            self._step_settings_frame, textvariable=self._step_speed_var,
-            width=Config.ENTRY_WIDTH, state='readonly',
-            readonlybackground=Theme.COLOR_ENTRY_BG
-        )
-        self._step_speed_entry = step_speed_entry
-        step_speed_entry.pack(side=tk.LEFT, padx=(0, 15))
-        step_speed_entry.bind('<Double-Button-1>', lambda e: self._enable_step_setting_edit('speed'))
-        self._bind_numeric_stepper(
-            step_speed_entry, self._step_speed_var,
-            Config.STEP_SPEED_KEY_INCREMENT, decimals=3,
-            min_value=lambda: self._min_speed,
-            max_value=lambda: self._max_speed
-        )
-
-        tk.Label(self._step_settings_frame, text="Step size (mm):").pack(side=tk.LEFT, padx=(0, 5))
-        step_size_entry = tk.Entry(
-            self._step_settings_frame, textvariable=self._step_size_var,
-            width=Config.ENTRY_WIDTH, state='readonly',
-            readonlybackground=Theme.COLOR_ENTRY_BG
-        )
-        self._step_size_entry = step_size_entry
-        step_size_entry.pack(side=tk.LEFT)
-        step_size_entry.bind('<Double-Button-1>', lambda e: self._enable_step_setting_edit('size'))
-        self._bind_numeric_stepper(
-            step_size_entry, self._step_size_var,
-            Config.STEP_SIZE_KEY_INCREMENT, decimals=3,
-            min_value=Config.MIN_STEP_SIZE
-        )
-
-        self._target_controls_frame = tk.Frame(parent)
-        self._target_controls_frame.pack(pady=(0, 15))
-
-        self._add_action_group(
-            self._target_controls_frame,
-            [("Run Selected", self._on_run), ("Pause Selected", self._on_pause), ("Zero Selected", self._on_zero)],
-            width=10,
-        )
-        self._add_action_group(
-            self._target_controls_frame,
-            [("Export", self._on_export), ("Clear Selected", self._on_clear)],
-            width=13,
-            padx=(14, 0),
-        )
-
-        self._step_controls_frame = tk.Frame(parent)
-        self._step_controls_frame.pack(pady=(0, 15))
-
-        self._add_action_group(
-            self._step_controls_frame,
-            [
-                ("Step Up", lambda: self._on_step(direction=-1)),
-                ("Step Down", lambda: self._on_step(direction=1)),
-                ("Pause Selected", self._on_pause),
-                ("Zero Selected", self._on_zero),
-            ],
-            width=11,
-        )
-        self._add_action_group(
-            self._step_controls_frame,
-            [("Export", self._on_export), ("Clear Selected", self._on_clear)],
-            width=13,
-            padx=(14, 0),
-        )
-
-        self._program_controls_frame = tk.Frame(parent)
-        self._program_controls_frame.pack(pady=(0, 15))
-
-        self._add_action_group(
-            self._program_controls_frame,
-            [
-                ("Run Selected", self._on_run),
-                ("Pause Selected", self._on_pause),
-                ("Zero Selected", self._on_zero),
-                ("Reset", self._on_reset_program),
-            ],
-            width=10,
-        )
-        self._add_action_group(
-            self._program_controls_frame,
-            [("Load Program", self._on_load_program), ("Save Program", self._on_save_program)],
-            width=13,
-            padx=(14, 0),
-        )
-        self._add_action_group(
-            self._program_controls_frame,
-            [("Clear Selected", self._on_clear)],
-            width=13,
-            padx=(14, 0),
-        )
-
-        self._update_mode_visibility()
-
-    def _add_action_group(self, parent: tk.Frame, buttons: list[tuple[str, Callable]],
-                          width: int, padx: tuple[int, int] = (0, 0)):
-        """Add a separated group of command buttons."""
-        group = tk.Frame(parent)
-        group.pack(side=tk.LEFT, padx=padx)
-        for text, command in buttons:
-            button = ttk.Button(group, text=text, command=command, width=max(width, len(text)),
-                                style="Primary.Console.TButton" if text in ("Run Selected", "Step Up", "Step Down")
-                                else "Pause.Console.TButton" if text == "Pause Selected" else "Console.TButton")
-            if text in ('Run Selected', 'Step Up', 'Step Down'):
-                # Some Tk platforms activate a focused button on Enter.
-                # Plain Enter confirms fields; only the explicit modifier
-                # shortcut may start movement.
-                button.bind('<Return>', lambda _event: 'break')
-                button.bind('<KP_Enter>', lambda _event: 'break')
-                for shortcut in self._run_shortcuts():
-                    button.bind(shortcut, self._on_run_shortcut)
-                button.bind('<KeyRelease-Return>', lambda _event: 'break')
-                button.bind('<KeyRelease-KP_Enter>', lambda _event: 'break')
-            button.pack(side=tk.LEFT, padx=2)
-
-    def _build_header_row(self):
-        """Build the header row with column labels."""
-        # Col 0: Buttons (+/-)
-        adjust_frame = tk.Frame(self._motors_container)
-        adjust_frame.grid(row=0, column=0, sticky='w', padx=(0, 5), pady=Config.HEADER_PAD_Y)
-        
-        ttk.Button(
-            adjust_frame, text="+", command=self._add_motor,
-            width=2, style="Console.TButton"
-        ).pack(side=tk.LEFT, padx=1)
-        
-        ttk.Button(
-            adjust_frame, text="-", command=self._remove_motor,
-            width=2, style="Console.TButton"
-        ).pack(side=tk.LEFT, padx=1)
-
-        if self._is_step_mode():
-            labels = [
-                (1, "Absolute (mm):"),
-                (2, "Relative (mm):"),
-                (3, "Notes:"),
-            ]
-        elif self._is_program_mode():
-            labels = [
-                (1, "Instructions:"),
-                (2, "Step:"),
-                (3, "Speed (mm/s):"),
-                (4, "Target (mm):"),
-                (5, "Absolute (mm):"),
-                (6, "Relative (mm):"),
-                (7, "Notes:"),
-            ]
-        else:
-            labels = [
-                (1, "Absolute (mm)"),
-                (2, "Relative (mm)"),
-                (3, "Target (mm)"),
-                (4, "Speed (mm/s)"),
-                (5, "Notes:"),
-            ]
-
-        for col, text in labels:
-            ttk.Label(
-                self._motors_container, text=text.rstrip(":"), anchor='center', style="Console.TLabel"
-            ).grid(row=0, column=col, sticky='ew', padx=5, pady=Config.HEADER_PAD_Y)
-
-    def _create_motor_row(self, state: MotorState, row_index: int) -> dict:
-        """
-        Create widgets for a motor row.
-        
-        Args:
-            state: MotorState for this row
-            row_index: Grid row index (1-based, 0 is header)
-            
-        Returns:
-            Dictionary of widget references.
-        """
-        widgets = {}
-        stripe = tk.Frame(self._motors_container)
-        stripe.grid(row=row_index, column=0, columnspan=self._visible_column_count(), sticky="nsew", pady=1)
-        widgets["stripe"] = stripe
-
-        # Col 0: Motor ID Label + Checkbox
-        id_frame = tk.Frame(self._motors_container)
-        id_frame.grid(row=row_index, column=0, sticky='w', padx=(0, 5), pady=10)
-        widgets['row_frames'] = [stripe, id_frame]
-
-        widgets['motor_label'] = tk.Label(id_frame, text=f"Drive {state.motor_id}:", width=8, anchor='w')
-        widgets['motor_label'].pack(side=tk.LEFT)
-
-        widgets['selected_var'] = tk.BooleanVar(value=state.is_selected)
-        widgets['checkbox'] = tk.Checkbutton(
-            id_frame,
-            variable=widgets['selected_var'],
-            command=lambda mid=state.motor_id: self._on_selection_change(mid)
-        )
-        widgets['checkbox'].pack(side=tk.LEFT)
-
-        widgets['motion_status'] = tk.Label(id_frame, text="Idle", width=10, anchor="center",
-                                            font=(self._console_font.actual("family"), 11, "bold"),
-                                            foreground="#626e7d", background=Theme.COLOR_BG)
-        widgets['motion_status']._monkeydrive_role = "motion_status"
-        widgets['motion_status'].pack(side=tk.LEFT, padx=(8, 0))
-
-        visible_widgets = [stripe, id_frame]
-
-        if self._is_step_mode():
-            absolute_col = 1
-            relative_col = 2
-            notes_col = 3
-        elif self._is_program_mode():
-            absolute_col = 5
-            relative_col = 6
-            notes_col = 7
-
-            widgets['instructions_button'] = ttk.Button(
-                self._motors_container,
-                text=self._instruction_button_text(state), style="Console.TButton",
-                command=lambda mid=state.motor_id: self._on_instructions_click(mid),
-                width=14
-            )
-            widgets['instructions_button'].grid(row=row_index, column=1, sticky='ew', padx=5, pady=10)
-
-            widgets['program_step_var'] = tk.StringVar(value=self._program_step_text(state))
-            widgets['program_step_entry'] = tk.Entry(
-                self._motors_container, textvariable=widgets['program_step_var'],
-                width=Config.ENTRY_WIDTH, state='readonly',
-                readonlybackground=Theme.COLOR_READONLY_BG
-            )
-            widgets['program_step_entry'].grid(row=row_index, column=2, sticky='ew', padx=5, pady=10)
-
-            instruction = self._current_instruction(state)
-            widgets['speed_var'] = tk.StringVar(value=f"{instruction.speed:g}" if instruction else "")
-            widgets['speed_entry'] = tk.Entry(
-                self._motors_container, textvariable=widgets['speed_var'],
-                width=Config.ENTRY_WIDTH, state='readonly',
-                readonlybackground=Theme.COLOR_READONLY_BG
-            )
-            widgets['speed_entry'].grid(row=row_index, column=3, sticky='ew', padx=5, pady=10)
-
-            widgets['target_var'] = tk.StringVar(value=format_mm(instruction.target) if instruction else "")
-            widgets['target_entry'] = tk.Entry(
-                self._motors_container, textvariable=widgets['target_var'],
-                width=Config.ENTRY_WIDTH, state='readonly',
-                readonlybackground=Theme.COLOR_READONLY_BG
-            )
-            widgets['target_entry'].grid(row=row_index, column=4, sticky='ew', padx=5, pady=10)
-
-            visible_widgets.extend([
-                widgets['instructions_button'],
-                widgets['program_step_entry'],
-                widgets['speed_entry'],
-                widgets['target_entry'],
-            ])
-        else:
-            absolute_col = 1
-            relative_col = 2
-            notes_col = 5
-
-            # Col 1: Speed entry
-            widgets['speed_var'] = tk.StringVar(value=f"{state.speed}" if state.speed else "")
-            widgets['speed_entry'] = tk.Entry(
-                self._motors_container, textvariable=widgets['speed_var'],
-                width=Config.ENTRY_WIDTH
-            )
-            widgets['speed_entry'].grid(row=row_index, column=4, sticky='ew', padx=5, pady=10)
-            widgets['speed_entry'].bind('<KeyRelease>', lambda e, mid=state.motor_id: self._on_speed_change(mid))
-            widgets['speed_entry'].bind('<FocusOut>', lambda e, mid=state.motor_id: self._on_speed_change(mid))
-            self._bind_numeric_stepper(
-                widgets['speed_entry'], widgets['speed_var'],
-                Config.SPEED_KEY_INCREMENT, decimals=3,
-                min_value=lambda: self._min_speed,
-                max_value=lambda: self._max_speed,
-                on_change=lambda mid=state.motor_id: self._on_speed_change(mid)
-            )
-            self._bind_vertical_tab(widgets['speed_entry'], state.motor_id, 'speed_entry')
-            visible_widgets.append(widgets['speed_entry'])
-
-            # Col 2: Target entry
-            widgets['target_var'] = tk.StringVar(value=format_mm(state.target) if state.target else "")
-            widgets['target_entry'] = tk.Entry(
-                self._motors_container, textvariable=widgets['target_var'],
-                width=Config.ENTRY_WIDTH
-            )
-            widgets['target_entry'].grid(row=row_index, column=3, sticky='ew', padx=5, pady=10)
-            widgets['target_entry'].bind('<KeyRelease>', lambda e, mid=state.motor_id: self._on_target_change(mid))
-            widgets['target_entry'].bind('<FocusOut>', lambda e, mid=state.motor_id: self._on_target_focus_out(mid))
-            self._bind_numeric_stepper(
-                widgets['target_entry'], widgets['target_var'],
-                Config.TARGET_KEY_INCREMENT, decimals=3,
-                min_value=Config.MIN_TARGET_POS,
-                max_value=Config.MAX_TARGET_POS,
-                on_change=lambda mid=state.motor_id: self._on_target_change(mid)
-            )
-            self._bind_vertical_tab(widgets['target_entry'], state.motor_id, 'target_entry')
-            visible_widgets.append(widgets['target_entry'])
-
-        # Absolute position
-        widgets['absolute_var'] = tk.StringVar(value=format_mm(state.absolute))
-        widgets['absolute_entry'] = tk.Entry(
-            self._motors_container, textvariable=widgets['absolute_var'],
-            width=Config.ENTRY_WIDTH, state='readonly',
-            readonlybackground=Theme.COLOR_READONLY_BG
-        )
-        widgets['absolute_entry'].grid(row=row_index, column=absolute_col, sticky='ew', padx=5, pady=10)
-        widgets['absolute_entry'].bind('<Double-Button-1>', lambda e, mid=state.motor_id: self._enable_absolute_edit(mid))
-
-        # Relative position
-        widgets['relative_var'] = tk.StringVar(value=format_mm(state.relative))
-        widgets['relative_entry'] = tk.Entry(
-            self._motors_container, textvariable=widgets['relative_var'],
-            width=Config.ENTRY_WIDTH, state='readonly',
-            readonlybackground=Theme.COLOR_READONLY_BG
-        )
-        widgets['relative_entry'].grid(row=row_index, column=relative_col, sticky='ew', padx=5, pady=10)
-        widgets['relative_entry'].bind('<Double-Button-1>', lambda e, mid=state.motor_id: self._enable_relative_edit(mid))
-
-        # Notes
-        notes_preview = state.notes[:15] + "..." if len(state.notes) > 15 else state.notes
-        widgets['notes_var'] = tk.StringVar(value=notes_preview)
-        widgets['notes_entry'] = tk.Entry(
-            self._motors_container, textvariable=widgets['notes_var'],
-            width=Config.ENTRY_WIDTH, state='readonly',
-            readonlybackground='white', cursor='hand2'
-        )
-        widgets['notes_entry'].grid(row=row_index, column=notes_col, sticky='ew', padx=5, pady=10)
-        widgets['notes_entry'].bind('<Double-Button-1>', lambda e, mid=state.motor_id: self._on_notes_click(mid))
-
-        widgets['zero_button'] = ttk.Button(
-            self._motors_container, text='Zero', width=7, style='Console.TButton',
-            command=lambda mid=state.motor_id: self._zero_motor(mid))
-        widgets['zero_button'].grid(row=row_index, column=notes_col + 1, padx=5, pady=10)
-
-        widgets["absolute_entry"].configure(font=self._readout_font, justify="center")
-        widgets["relative_entry"].configure(justify="center")
-        for key in ("speed_entry", "target_entry"):
-            if key in widgets:
-                widgets[key].configure(justify="right")
-
-        # Store references to widgets for cleanup
-        visible_widgets.extend([
-            widgets['absolute_entry'], widgets['relative_entry'], widgets['notes_entry'], widgets['zero_button']
-        ])
-        widgets['all_widgets'] = visible_widgets
-        self._apply_row_selection_style(widgets, state.is_selected)
-
-        return widgets
-
     def _rebuild_motor_rows(self):
-        """Rebuild all motor row widgets."""
-        for child in self._motors_container.winfo_children():
-            child.destroy()
-        self._motor_widgets.clear()
-
-        if self._is_step_mode():
-            min_widths = Config.STEP_COL_MIN_WIDTHS
-        elif self._is_program_mode():
-            min_widths = Config.PROGRAM_COL_MIN_WIDTHS
-        else:
-            min_widths = Config.COL_MIN_WIDTHS
-        max_columns = max(
-            len(Config.COL_MIN_WIDTHS),
-            len(Config.STEP_COL_MIN_WIDTHS),
-            len(Config.PROGRAM_COL_MIN_WIDTHS),
-        )
-        for i in range(max_columns):
-            self._motors_container.grid_columnconfigure(i, weight=0, minsize=0)
-        for i, min_w in enumerate(min_widths):
-            self._motors_container.grid_columnconfigure(i, weight=1, minsize=min_w)
-
-        self._build_header_row()
-
-        # Recreate rows starting from index 1 (0 is header)
-        for i, state in enumerate(self._motor_states):
-            widgets = self._create_motor_row(state, row_index=i + 1)
-            self._motor_widgets.append(widgets)
-
-        self._style_widget_tree(self._motors_container)
-        for state, widgets in zip(self._motor_states, self._motor_widgets):
-            self._apply_row_selection_style(widgets, state.is_selected)
-        roster = tuple(s.motor_id for s in self._motor_states)
+        """Refresh the console and publish changed drive membership to viewers."""
+        self.view.rebuild_motor_rows()
+        roster = tuple(state.motor_id for state in self._motor_states)
         if self._trajectory_summary_window and roster != self._trajectory_roster:
-            self._trajectory_summary_window.send({'type': 'motor_states',
-                'motor_states': [s.to_dict() for s in self._motor_states], 'revisions': dict(self._trajectory_revisions)})
+            self._trajectory_summary_window.send({
+                'type': 'motor_states',
+                'motor_states': [state.to_dict() for state in self._motor_states],
+                'revisions': dict(self._trajectory_revisions),
+            })
         self._trajectory_roster = roster
-        self._rebuild_compact_rows()
-        self._fit_window_to_content()
-
-    def _visible_column_count(self) -> int:
-        """Return the number of visible columns in the active motor table."""
-        if self._is_step_mode():
-            return len(Config.STEP_COL_MIN_WIDTHS)
-        if self._is_program_mode():
-            return len(Config.PROGRAM_COL_MIN_WIDTHS)
-        return len(Config.COL_MIN_WIDTHS)
 
     # -------------------------------------------------------------------------
     # Helper Methods
     # -------------------------------------------------------------------------
 
-    def _is_step_mode(self) -> bool:
-        """Return whether the GUI is currently in step mode."""
-        return bool(self._mode_var and self._mode_var.get() == Config.MODE_STEP)
-
-    def _is_program_mode(self) -> bool:
-        """Return whether the GUI is currently in program mode."""
-        return bool(self._mode_var and self._mode_var.get() == Config.MODE_PROGRAM)
-
     def _select_mode(self, mode: str):
         """Select a movement mode from the segmented button control."""
-        if self._mode_var:
-            self._mode_var.set(mode)
+        if self.view.mode_var:
+            self.view.mode_var.set(mode)
         self._on_mode_change()
-
-    def _refresh_mode_buttons(self):
-        """Update segmented mode button relief to match the selected mode."""
-        current = self._mode_var.get() if self._mode_var else Config.MODE_TARGET
-        for mode, button in self._mode_buttons.items():
-            selected = mode == current
-            try:
-                button.configure(style="Selected.Console.TButton" if selected else "Console.TButton")
-            except tk.TclError:
-                pass
 
     def _on_mode_change(self):
         """Handle switching between movement modes."""
-        self._reset_step_key_state()
-        self._refresh_mode_buttons()
-        self._update_mode_visibility()
+        self.shortcuts.reset_step_key_state()
+        self.view.refresh_mode_buttons()
+        self.view.update_mode_visibility()
         self._rebuild_motor_rows()
-        self._fit_window_to_content()
-
-    def _update_mode_visibility(self):
-        """Show controls for the selected movement mode."""
-        if hasattr(self, '_compact_run_btn'):
-            self._compact_run_btn.configure(state='disabled' if self._is_step_mode() else 'normal')
-        if not (
-            self._target_controls_frame
-            and self._step_controls_frame
-            and self._step_settings_frame
-            and self._program_controls_frame
-        ):
-            return
-
-        if self._is_step_mode():
-            self._target_controls_frame.pack_forget()
-            self._program_controls_frame.pack_forget()
-            self._pack_above_motor_table(self._step_settings_frame, pady=(0, 10))
-            self._pack_above_motor_table(self._step_controls_frame, pady=(0, 15))
-        elif self._is_program_mode():
-            self._target_controls_frame.pack_forget()
-            self._step_settings_frame.pack_forget()
-            self._step_controls_frame.pack_forget()
-            self._pack_above_motor_table(self._program_controls_frame, pady=(0, 15))
-        else:
-            self._step_settings_frame.pack_forget()
-            self._step_controls_frame.pack_forget()
-            self._program_controls_frame.pack_forget()
-            self._pack_above_motor_table(self._target_controls_frame, pady=(0, 15))
-
-    def _pack_above_motor_table(self, frame: tk.Frame, **pack_options):
-        """Pack a control frame before the motor table, even after mode toggles."""
-        if self._motors_container and frame.master == self._motors_container.master:
-            frame.pack(before=self._motors_container, **pack_options)
-        else:
-            frame.pack(**pack_options)
-
-    def _current_instruction(self, state: MotorState) -> Optional[InstructionStep]:
-        """Return the current instruction for a motor, if any."""
-        if not state.instructions:
-            return None
-        index = max(0, min(state.instruction_index, len(state.instructions) - 1))
-        return state.instructions[index]
+        self.view.fit_window_to_content()
 
     def _instruction_button_text(self, state: MotorState) -> str:
         """Return instruction editor button text for one motor."""
@@ -961,7 +204,7 @@ class MonkeyDriveApp:
     def _update_program_row(self, motor_id: int):
         """Refresh program-mode readouts for one motor."""
         state = self._get_state(motor_id)
-        widgets = self._get_widgets(motor_id)
+        widgets = self.view.get_widgets(motor_id)
         if not state or not widgets:
             return
 
@@ -970,408 +213,44 @@ class MonkeyDriveApp:
         if 'program_step_var' in widgets:
             widgets['program_step_var'].set(self._program_step_text(state))
 
-        instruction = self._current_instruction(state)
+        instruction = self.motion.current_instruction(state)
         if 'speed_var' in widgets:
             widgets['speed_var'].set(f"{instruction.speed:g}" if instruction else "")
         if 'target_var' in widgets:
             widgets['target_var'].set(format_mm(instruction.target) if instruction else "")
 
-    def _activate_program_instruction(self, state: MotorState, instruction: InstructionStep):
-        """Mirror the active program instruction into the motor's target-mode state."""
-        state.speed = instruction.speed
-        state.target = round(instruction.target, 3)
+    def _on_program_instruction_activated(self, state: MotorState):
+        """Reflect the controller's active instruction in trajectory views."""
         self._sync_trajectory_from_target(state)
         self._update_trajectory_summary_motor_state(state)
 
-    def _apply_row_selection_style(self, widgets: dict, selected: bool):
-        """Visually mark rows selected for group movement commands."""
-        bg = Theme.COLOR_ROW_SELECTED_BG if selected else Theme.COLOR_BG
-
-        for frame in widgets.get('row_frames', []):
-            try:
-                frame.configure(background=bg)
-            except tk.TclError:
-                pass
-
-        for key in ('motor_label', 'checkbox', 'motion_status'):
-            widget = widgets.get(key)
-            if widget:
-                try:
-                    widget.configure(background=bg)
-                    if key == "checkbox":
-                        widget.configure(activebackground=bg)
-                except tk.TclError:
-                    pass
-
-        for key in ("absolute_entry", "relative_entry"):
-            if key in widgets:
-                widgets[key].configure(readonlybackground=bg,
-                                       highlightthickness=0 if widgets[key].cget("state") == "readonly" else 1)
-        if hasattr(self, "_selection_text"):
-            count = sum(state.is_selected for state in self._motor_states)
-            self._selection_text.set(f"{count} of {len(self._motor_states)} drives selected  /  Movement commands apply to selected drives")
-
-    def _bind_numeric_stepper(self, entry: tk.Entry, variable: tk.StringVar,
-                              increment: float, decimals: int,
-                              min_value=None, max_value=None,
-                              on_change: Callable = None):
-        """Bind Up/Down keys to increment a numeric entry."""
-        entry.bind(
-            '<Up>',
-            lambda event: self._adjust_numeric_entry(
-                variable, increment, decimals, min_value, max_value, on_change
-            )
-        )
-        entry.bind(
-            '<Down>',
-            lambda event: self._adjust_numeric_entry(
-                variable, -increment, decimals, min_value, max_value, on_change
-            )
-        )
-
-    def _adjust_numeric_entry(self, variable: tk.StringVar, delta: float,
-                              decimals: int, min_value=None, max_value=None,
-                              on_change: Callable = None):
-        """Adjust a numeric entry value and keep focus in the edited field."""
-        try:
-            value = float(variable.get())
-        except ValueError:
-            value = 0.0
-
-        value += delta
-
-        if callable(min_value):
-            min_value = min_value()
-        if callable(max_value):
-            max_value = max_value()
-
-        if min_value is not None and value < min_value:
-            value = min_value
-        if max_value is not None and value > max_value:
-            value = max_value
-
-        variable.set(f"{value:.{decimals}f}")
-        if on_change:
-            on_change()
-        return "break"
-
-    def _bind_vertical_tab(self, entry: tk.Entry, motor_id: int, widget_key: str):
-        """Bind Tab and Shift-Tab to move vertically within a table column."""
-        entry.bind(
-            '<Tab>',
-            lambda event: self._focus_vertical_entry(motor_id, widget_key, direction=1)
-        )
-        entry.bind(
-            '<Shift-Tab>',
-            lambda event: self._focus_vertical_entry(motor_id, widget_key, direction=-1)
-        )
-
-    def _focus_vertical_entry(self, motor_id: int, widget_key: str, direction: int):
-        """Move focus vertically, then horizontally at column boundaries."""
-        next_id = motor_id + direction
-
-        while 1 <= next_id <= len(self._motor_widgets):
-            widgets = self._get_widgets(next_id)
-            if widgets and widget_key in widgets:
-                widgets[widget_key].focus_set()
-                widgets[widget_key].select_range(0, tk.END)
-                return "break"
-            next_id += direction
-
-        columns = ['speed_entry', 'target_entry']
-        try:
-            column_index = columns.index(widget_key)
-        except ValueError:
-            return "break"
-
-        next_column_index = column_index + direction
-        if next_column_index < 0 or next_column_index >= len(columns):
-            next_column_index %= len(columns)
-
-        next_widget_key = columns[next_column_index]
-        next_id = 1 if direction > 0 else len(self._motor_widgets)
-
-        while 1 <= next_id <= len(self._motor_widgets):
-            widgets = self._get_widgets(next_id)
-            if widgets and next_widget_key in widgets:
-                widgets[next_widget_key].focus_set()
-                widgets[next_widget_key].select_range(0, tk.END)
-                return "break"
-            next_id += direction
-
-        return "break"
-
-    def _bind_keyboard_shortcuts(self):
-        """Bind global keyboard shortcuts for movement commands."""
-        self._root.bind_all('<KeyPress>', self._on_keypress)
-        self._root.bind_all('<KeyRelease>', self._on_keyrelease)
-        for shortcut in self._run_shortcuts():
-            self._root.bind(shortcut, self._on_run_shortcut)
-        self._root.bind_all('<End>', self._on_pause_shortcut)
-        self._root.bind('<FocusOut>', self._on_jog_focus_out, add='+')
-        self._root.bind('<Unmap>', self._on_jog_unmap, add='+')
-
-    def _on_jog_focus_out(self, _event):
-        if self._focus_check_job is None and not self._closing:
-            self._focus_check_job = self._root.after_idle(self._check_jog_focus)
-
-    def _check_jog_focus(self):
-        self._focus_check_job = None
-        focus = self._root.focus_get()
-        if focus is None or focus.winfo_toplevel() != self._root or self._is_editable_text_widget(focus):
-            self._reset_step_key_state()
-
-    def _on_jog_unmap(self, event):
-        if event.widget == self._root:
-            self._reset_step_key_state()
-
-    def _on_pause_shortcut(self, event):
-        """Pause selected running motors from the End key."""
-        self._on_stop_all() if self._compact_active else self._on_pause()
-        return "break"
-
-    def _run_shortcuts(self):
-        # Command is a macOS modifier. Its Tk alias on other platforms can
-        # overlap unrelated modifier states (for example keyboard lock keys).
-        modifier = 'Command' if self._root.tk.call('tk', 'windowingsystem') == 'aqua' else 'Control'
-        return (f'<{modifier}-Return>', f'<{modifier}-KP_Enter>')
-
-    def _on_run_shortcut(self, event):
-        """Match Run Selected in Target/Program; Step mode has no Run action."""
-        required_modifier = 0x0008 if self._root.tk.call('tk', 'windowingsystem') == 'aqua' else 0x0004
-        if event.state & required_modifier and not self._compact_active and not self._is_step_mode():
-            self._on_run()
-        return 'break'
-
-    def _on_keypress(self, event):
-        """Handle step-mode keyboard shortcuts."""
-        key = 'down' if self._is_step_down_key(event) else 'up' if self._is_step_up_key(event) else None
-        if key in self._blocked_step_keys:
-            return self._handle_step_keypress(key, 1 if key == 'down' else -1)
-        if self._compact_active:
-            return None
-        if not self._is_step_mode():
-            return None
-
-        widget = self._event_widget(event)
-        if widget and widget.winfo_toplevel() != self._root:
-            return None
-
-        if widget and self._is_editable_text_widget(widget):
-            return None
-
-        if self._is_step_down_key(event):
-            return self._handle_step_keypress("down", direction=1)
-
-        if self._is_step_up_key(event):
-            return self._handle_step_keypress("up", direction=-1)
-
-        digit = self._shortcut_digit(event)
-        if digit is None:
-            return None
-
-        self._select_only_motor(digit)
-        return "break"
-
-    def _on_keyrelease(self, event):
-        """Stop step-mode jog motion when a step shortcut key is released."""
-        key = 'down' if self._is_step_down_key(event) else 'up' if self._is_step_up_key(event) else None
-        if key in self._blocked_step_keys:
-            previous = self._step_unblock_jobs.pop(key, None)
-            if previous is not None:
-                self._root.after_cancel(previous)
-            def unblock():
-                self._step_unblock_jobs.pop(key, None)
-                self._blocked_step_keys.discard(key)
-            self._step_unblock_jobs[key] = self._root.after(Config.STEP_KEY_RELEASE_DEBOUNCE_MS, unblock)
-            return 'break'
-        # The release belongs to the original gesture, even if focus changed.
-        if not self._active_step_key:
-            return None
-
-        if self._is_step_down_key(event):
-            return self._handle_step_keyrelease("down")
-
-        if self._is_step_up_key(event):
-            return self._handle_step_keyrelease("up")
-
-        return None
-
-    def _handle_step_keypress(self, key_name: str, direction: int):
-        """Handle initial step shortcut press and ignore key-repeat repeats."""
-        if key_name in self._blocked_step_keys:
-            pending = self._step_unblock_jobs.pop(key_name, None)
-            if pending is not None:
-                self._root.after_cancel(pending)
-            return 'break'
-        self._cancel_step_key_release_job()
-
-        if self._active_step_key == key_name:
-            return "break"
-
-        self._reset_step_key_state()
-        self._active_step_key = key_name
-        self._active_step_direction = direction
-        self._step_key_motor_ids = tuple(state.motor_id for state in self._selected_states())
-        self._on_step(direction=direction)
-        self._step_key_hold_job = self._root.after(
-            Config.STEP_JOG_HOLD_DELAY_MS, self._start_step_jog
-        )
-        return "break"
-
-    def _handle_step_keyrelease(self, key_name: str):
-        """Handle release of a step shortcut key."""
-        if self._active_step_key != key_name:
-            return "break"
-
-        self._cancel_step_key_release_job()
-        self._step_key_release_job = self._root.after(
-            Config.STEP_KEY_RELEASE_DEBOUNCE_MS, self._finish_step_keyrelease
-        )
-        return "break"
-
-    def _finish_step_keyrelease(self):
-        """Finish a step shortcut release after key-repeat debounce."""
-        self._step_key_release_job = None
-        self._cancel_step_key_hold_job()
-        if self._step_key_is_jogging:
-            self._pause_motors(self._step_key_motor_ids)
-        self._active_step_key = None
-        self._active_step_direction = 0
-        self._step_key_is_jogging = False
-        self._step_key_motor_ids = ()
-
-    def _start_step_jog(self):
-        """Convert a held step shortcut into continuous jog motion."""
-        self._step_key_hold_job = None
-        if not self._active_step_key or self._active_step_direction == 0:
-            return
-        if self._step_key_release_job is not None:
-            # Do not enter continuous motion while a release is being debounced.
-            # A repeat press can cancel the release and this retry can then jog.
-            self._step_key_hold_job = self._root.after(Config.STEP_KEY_RELEASE_DEBOUNCE_MS, self._start_step_jog)
-            return
-
-        if not self._serial_manager.is_connected:
-            return
-
-        selected = [self._get_state(mid) for mid in self._step_key_motor_ids if self._get_state(mid)]
-        if not selected or not self._validate_absolute_edits_closed(selected):
-            return
-
-        step_settings = self._parse_step_settings()
-        if not step_settings:
-            return
-
-        speed, _ = step_settings
-        target = Config.MAX_TARGET_POS if self._active_step_direction > 0 else Config.MIN_TARGET_POS
-
-        for state in selected:
-            self._step_targets[state.motor_id] = target
-            cmd = SerialProtocol.cmd_run(state.motor_id, speed, target, state.absolute)
-            state.is_running = self._queue_motion(state, cmd)
-
-        self._step_key_is_jogging = True
-
-    def _cancel_step_key_release_job(self):
-        """Cancel a pending jog stop."""
-        if self._step_key_release_job is not None:
-            self._root.after_cancel(self._step_key_release_job)
-            self._step_key_release_job = None
-
-    def _cancel_step_key_hold_job(self):
-        """Cancel a pending transition from single-step to jog."""
-        if self._step_key_hold_job is not None:
-            self._root.after_cancel(self._step_key_hold_job)
-            self._step_key_hold_job = None
-
-    def _is_step_down_key(self, event) -> bool:
-        """Return True for keys that trigger Step Down."""
-        return event.keysym in ('KP_Add', 'plus', 'equal')
-
-    def _is_step_up_key(self, event) -> bool:
-        """Return True for keys that trigger Step Up."""
-        return event.keysym in ('KP_Subtract', 'minus', 'underscore')
-
     def _pause_motors(self, motor_ids):
-        """Stop explicit IDs independently of selection or running flags."""
-        for motor_id in set(motor_ids):
-            self._serial_manager.send(SerialProtocol.cmd_pause(motor_id))
-            state = self._get_state(motor_id) or self._hidden_motor_states.get(motor_id)
-            if state:
-                state.is_running = False
-                if state.instruction_status == 'running':
-                    state.instruction_status = 'paused'
-                    self._update_program_row(motor_id)
-            self._step_targets.pop(motor_id, None)
-            self._motion_targets.pop(motor_id, None)
-
-    def _reset_step_key_state(self):
-        """Clear step shortcut repeat state."""
-        if self._active_step_key:
-            self._blocked_step_keys.add(self._active_step_key)
-        self._cancel_step_key_release_job()
-        self._cancel_step_key_hold_job()
-        self._pause_motors(self._step_key_motor_ids)
-        self._active_step_key = None
-        self._active_step_direction = 0
-        self._step_key_is_jogging = False
-        self._step_key_motor_ids = ()
-
-    def _event_widget(self, event):
-        """Return the Tk widget object for an event."""
-        if isinstance(event.widget, str):
-            try:
-                return self._root.nametowidget(event.widget)
-            except KeyError:
-                return None
-        return event.widget
+        """Resolve visible/retained models for an explicit controller pause."""
+        self.motion.pause(motor_ids, [*self._motor_states, *self._hidden_motor_states.values()])
 
     def _focus_main_window(self):
         """Return keyboard focus to the main application window."""
-        if self._active_step_key:
+        if self.shortcuts.active_step_key:
             return
         self._root.after_idle(self._root.focus_force)
-
-    def _is_editable_text_widget(self, widget) -> bool:
-        """Return True when a keypress should be treated as text input."""
-        if isinstance(widget, tk.Text):
-            return True
-        if isinstance(widget, tk.Entry):
-            try:
-                return widget.cget('state') != 'readonly'
-            except tk.TclError:
-                return True
-        return False
-
-    def _shortcut_digit(self, event) -> Optional[int]:
-        """Return a motor shortcut digit for normal or keypad number keys."""
-        key = event.keysym
-        if key.startswith('KP_'):
-            key = key[3:]
-        if key.isdigit():
-            digit = int(key)
-            if 1 <= digit <= Config.MAX_MOTORS:
-                return digit
-        return None
 
     def _select_only_motor(self, motor_id: int):
         """Select one motor and deselect all others."""
         if motor_id < 1 or motor_id > len(self._motor_states):
             return
-        if self._step_key_motor_ids and self._step_key_motor_ids != (motor_id,):
-            self._reset_step_key_state()
+        if self.shortcuts.step_key_motor_ids and self.shortcuts.step_key_motor_ids != (motor_id,):
+            self.shortcuts.reset_step_key_state()
 
         for state in self._motor_states:
             state.is_selected = (state.motor_id == motor_id)
-            widgets = self._get_widgets(state.motor_id)
+            widgets = self.view.get_widgets(state.motor_id)
             if widgets:
                 widgets['selected_var'].set(state.is_selected)
-                self._apply_row_selection_style(widgets, state.is_selected)
+                self.view.apply_row_selection_style(widgets, state.is_selected)
 
     def _enable_step_setting_edit(self, setting: str):
         """Enable editing for a step setting field."""
-        entry = self._step_speed_entry if setting == 'speed' else self._step_size_entry
+        entry = self.view.step_speed_entry if setting == 'speed' else self.view.step_size_entry
         if not entry:
             return
 
@@ -1383,8 +262,8 @@ class MonkeyDriveApp:
 
     def _confirm_step_setting_edit(self, setting: str):
         """Validate and lock a step setting field after editing."""
-        entry = self._step_speed_entry if setting == 'speed' else self._step_size_entry
-        variable = self._step_speed_var if setting == 'speed' else self._step_size_var
+        entry = self.view.step_speed_entry if setting == 'speed' else self.view.step_size_entry
+        variable = self.view.step_speed_var if setting == 'speed' else self.view.step_size_var
         if not entry or not variable or entry['state'] == 'readonly':
             return
 
@@ -1403,13 +282,6 @@ class MonkeyDriveApp:
         entry.config(state='readonly', readonlybackground=Theme.COLOR_ENTRY_BG)
         self._root.focus_set()
 
-    def _get_widgets(self, motor_id: int) -> Optional[dict]:
-        """Get widget dictionary for motor by ID."""
-        idx = motor_id - 1
-        if 0 <= idx < len(self._motor_widgets):
-            return self._motor_widgets[idx]
-        return None
-
     def _get_state(self, motor_id: int) -> Optional[MotorState]:
         """Get MotorState for motor by ID."""
         idx = motor_id - 1
@@ -1424,7 +296,7 @@ class MonkeyDriveApp:
     def _validate_absolute_edits_closed(self, selected: list) -> bool:
         """Return True when selected motors are not editing absolute position."""
         for state in selected:
-            widgets = self._get_widgets(state.motor_id)
+            widgets = self.view.get_widgets(state.motor_id)
             if widgets and widgets['absolute_entry']['state'] != 'readonly':
                 self._safe_popup(
                     messagebox.showwarning, "Edit In Progress",
@@ -1435,34 +307,16 @@ class MonkeyDriveApp:
         return True
 
     def _parse_step_settings(self) -> Optional[tuple]:
-        """Validate and return step speed and size in mm."""
+        """Read Tk values; numeric rules belong to the motion controller."""
+        speed = self.view.step_speed_var.get() if self.view.step_speed_var is not None else None
+        size = self.view.step_size_var.get() if self.view.step_size_var is not None else None
         try:
-            speed = float(self._step_speed_var.get())
-        except (AttributeError, ValueError):
-            self._safe_popup(messagebox.showwarning, "Invalid Input", "Invalid step speed input.")
+            settings = self.motion.parse_step_settings(speed, size, self._min_speed, self._max_speed)
+        except MotionError as error:
+            self._show_motion_error(error)
             return None
-
-        try:
-            step_size = float(self._step_size_var.get())
-        except (AttributeError, ValueError):
-            self._safe_popup(messagebox.showwarning, "Invalid Input", "Invalid step size input.")
-            return None
-
-        if not (self._min_speed <= speed <= self._max_speed):
-            self._safe_popup(
-                messagebox.showwarning, "Invalid Input",
-                f"Step speed must be between {self._min_speed}mm/s and {self._max_speed}mm/s."
-            )
-            return None
-
-        if not math.isfinite(step_size) or step_size < Config.MIN_STEP_SIZE:
-            self._safe_popup(messagebox.showwarning, "Invalid Input",
-                             f"Step size must be at least {Config.MIN_STEP_SIZE:g}mm.")
-            return None
-
-        step_size = round(step_size, 3)
-        self._step_size_var.set(format_mm(step_size))
-        return speed, step_size
+        self.view.step_size_var.set(format_mm(settings[1]))
+        return settings
 
     def _send_settings_to_controller(self):
         """Send current runtime settings to the connected controller."""
@@ -1483,7 +337,7 @@ class MonkeyDriveApp:
             self._root, self._min_speed, self._max_speed, self._backlash,
             self._on_settings_save
         )
-        self._style_widget_tree(self._settings_window)
+        self.view.style_widget_tree(self._settings_window)
 
     def _on_settings_save(self, min_speed: float, max_speed: float, backlash: float):
         """Save global settings and push them to the controller."""
@@ -1561,8 +415,8 @@ class MonkeyDriveApp:
     def _refresh_trajectory_buttons(self):
         """Enable trajectory buttons only when anatomy data is available."""
         state = tk.NORMAL if self._has_loaded_anatomy() else tk.DISABLED
-        if self._trajectory_summary_btn:
-            self._trajectory_summary_btn.configure(state=state)
+        if self.view.trajectory_summary_btn:
+            self.view.trajectory_summary_btn.configure(state=state)
     def _poll_serial_events(self):
         """Only this Tk callback renews the controller's GUI responsiveness lease."""
         if self._closing:
@@ -1571,10 +425,10 @@ class MonkeyDriveApp:
             self._serial_manager.poll_events()
             self._refresh_running_indicators()
             status = "Connected" if self._serial_manager.is_connected else "Connecting / disconnecting" if self._serial_manager.is_busy else "Disconnected"
-            if self._connection_text.get() != status:
-                self._connection_text.set(status)
+            if self.view.connection_text.get() != status:
+                self.view.connection_text.set(status)
             if not self._config_loading and not self._serial_manager.is_busy and not self._serial_manager.is_connected:
-                self._connect_btn.config(text="Connect", state="normal")
+                self.view.connect_btn.config(text="Connect", state="normal")
         except Exception:
             logger.exception("Serial event handling failed; stopping connection")
             self._serial_manager.disconnect()
@@ -1696,17 +550,17 @@ class MonkeyDriveApp:
 
     def _on_selection_change(self, motor_id: int):
         """Handle motor selection checkbox change."""
-        self._reset_step_key_state()
+        self.shortcuts.reset_step_key_state()
         state = self._get_state(motor_id)
-        widgets = self._get_widgets(motor_id)
+        widgets = self.view.get_widgets(motor_id)
         if state and widgets:
             state.is_selected = widgets['selected_var'].get()
-            self._apply_row_selection_style(widgets, state.is_selected)
+            self.view.apply_row_selection_style(widgets, state.is_selected)
 
     def _on_speed_change(self, motor_id: int):
         """Handle speed input change."""
         state = self._get_state(motor_id)
-        widgets = self._get_widgets(motor_id)
+        widgets = self.view.get_widgets(motor_id)
         if state and widgets:
             try:
                 state.speed = float(widgets['speed_var'].get())
@@ -1716,7 +570,7 @@ class MonkeyDriveApp:
     def _on_target_change(self, motor_id: int):
         """Handle target input change."""
         state = self._get_state(motor_id)
-        widgets = self._get_widgets(motor_id)
+        widgets = self.view.get_widgets(motor_id)
         if state and widgets:
             try:
                 new_target = float(widgets['target_var'].get())
@@ -1729,14 +583,14 @@ class MonkeyDriveApp:
         """Handle target input confirmation."""
         self._on_target_change(motor_id)
         state = self._get_state(motor_id)
-        widgets = self._get_widgets(motor_id)
+        widgets = self.view.get_widgets(motor_id)
         if state and widgets:
             widgets['target_var'].set(format_mm(state.target))
 
     def _enable_absolute_edit(self, motor_id: int):
         """Enable editing of absolute position field."""
         state = self._get_state(motor_id)
-        widgets = self._get_widgets(motor_id)
+        widgets = self.view.get_widgets(motor_id)
         if widgets and state:
             # If motor is running, pause it before editing
             if state.is_running:
@@ -1754,7 +608,7 @@ class MonkeyDriveApp:
     def _on_absolute_confirm(self, motor_id: int):
         """Handle confirmation of absolute position edit."""
         state = self._get_state(motor_id)
-        widgets = self._get_widgets(motor_id)
+        widgets = self.view.get_widgets(motor_id)
         if not state or not widgets:
             return
 
@@ -1783,11 +637,11 @@ class MonkeyDriveApp:
             widgets['absolute_var'].set(format_mm(state.absolute))
 
         entry.config(state='readonly', readonlybackground=Theme.COLOR_READONLY_BG)
-        self._apply_row_selection_style(widgets, state.is_selected)
+        self.view.apply_row_selection_style(widgets, state.is_selected)
 
     def _enable_relative_edit(self, motor_id: int):
         """Enable editing of relative position field."""
-        widgets = self._get_widgets(motor_id)
+        widgets = self.view.get_widgets(motor_id)
         if widgets:
             entry = widgets['relative_entry']
             entry.config(state='normal', background='white', highlightthickness=1)
@@ -1799,7 +653,7 @@ class MonkeyDriveApp:
     def _on_relative_confirm(self, motor_id: int):
         """Handle confirmation of relative position edit."""
         state = self._get_state(motor_id)
-        widgets = self._get_widgets(motor_id)
+        widgets = self.view.get_widgets(motor_id)
         if not state or not widgets:
             return
 
@@ -1817,7 +671,7 @@ class MonkeyDriveApp:
         widgets['relative_var'].set(format_mm(state.relative))
 
         entry.config(state='readonly', readonlybackground=Theme.COLOR_READONLY_BG)
-        self._apply_row_selection_style(widgets, state.is_selected)
+        self.view.apply_row_selection_style(widgets, state.is_selected)
 
     def _on_notes_click(self, motor_id: int):
         """Handle notes field click to open notes window."""
@@ -1835,7 +689,7 @@ class MonkeyDriveApp:
     def _on_notes_save(self, motor_id: int, notes: str):
         """Handle notes save from notes window."""
         state = self._get_state(motor_id)
-        widgets = self._get_widgets(motor_id)
+        widgets = self.view.get_widgets(motor_id)
         if state and widgets:
             state.notes = notes
             preview = notes[:15] + "..." if len(notes) > 15 else notes
@@ -1878,9 +732,9 @@ class MonkeyDriveApp:
             state.instruction_index = min(previous_index, len(state.instructions) - 1)
             state.instruction_status = previous_status if previous_status != "running" else "paused"
             if state.instruction_status in ("paused", "running"):
-                instruction = self._current_instruction(state)
+                instruction = self.motion.current_instruction(state)
                 if instruction:
-                    self._activate_program_instruction(state, instruction)
+                    self.motion.activate_instruction(state, instruction)
         else:
             state.instruction_index = 0
             state.instruction_status = "idle"
@@ -2002,7 +856,7 @@ class MonkeyDriveApp:
             return
 
         state.target = target
-        widgets = self._get_widgets(state.motor_id)
+        widgets = self.view.get_widgets(state.motor_id)
         if widgets and 'target_var' in widgets:
             widgets['target_var'].set(format_mm(state.target))
 
@@ -2038,16 +892,16 @@ class MonkeyDriveApp:
     def _refresh_ports(self, event=None):
         """Refresh the list of available serial ports."""
         ports = SerialManager.list_ports()
-        current = self._port_var.get() if self._port_var else ""
+        current = self.view.port_var.get() if self.view.port_var else ""
         if current and current not in ports:
             ports.insert(0, current)
-        self._port_combo['values'] = ports
+        self.view.port_combo['values'] = ports
 
     def _on_connect(self):
         """Handle connect/disconnect button click."""
         if self._config_loading and not self._serial_manager.is_connected:
             return
-        port = self._port_var.get()
+        port = self.view.port_var.get()
         if not port:
             messagebox.showwarning("No Port", "Please select a port.")
             return
@@ -2055,7 +909,7 @@ class MonkeyDriveApp:
 
         if self._serial_manager.is_connected:
             # Pause all running motors before disconnecting
-            self._reset_step_key_state()
+            self.shortcuts.reset_step_key_state()
             for state in self._motor_states:
                 if state.is_running:
                     self._serial_manager.send(SerialProtocol.cmd_pause(state.motor_id))
@@ -2064,36 +918,36 @@ class MonkeyDriveApp:
                         state.instruction_status = "paused"
                         self._update_program_row(state.motor_id)
             self._serial_manager.disconnect()
-            self._step_targets.clear()
-            self._connect_btn.config(text="Disconnecting...", state="disabled")
+            self.motion.step_targets.clear()
+            self.view.connect_btn.config(text="Disconnecting...", state="disabled")
             self._focus_main_window()
         else:
             if self._serial_manager.connect(port):
-                self._connect_btn.config(text="Connecting...", state="disabled")
+                self.view.connect_btn.config(text="Connecting...", state="disabled")
             else:
-                self._connect_btn.config(text="Disconnecting...", state="disabled")
+                self.view.connect_btn.config(text="Disconnecting...", state="disabled")
 
     def _on_connected(self):
         """Finish connection setup on the Tk thread after the worker opens the port."""
         self._send_settings_to_controller()
-        self._connect_btn.config(text="Disconnect", state="normal")
+        self.view.connect_btn.config(text="Disconnect", state="normal")
         self._save_state()
         self._focus_main_window()
 
     def _on_connection_lost(self):
         """Handle a queued connection-loss event on the Tk thread."""
-        self._reset_step_key_state()
+        self.shortcuts.reset_step_key_state()
         for state in self._motor_states:
             if state.instruction_status == "running":
                 state.instruction_status = "paused"
                 self._update_program_row(state.motor_id)
             state.is_running = False
-        self._step_targets.clear()
+        self.motion.step_targets.clear()
         self._root.after(0, self._show_connection_lost_dialog)
 
     def _show_connection_lost_dialog(self):
         """Show connection lost dialog on main thread."""
-        self._connect_btn.config(text="Connect", state="normal")
+        self.view.connect_btn.config(text="Connect", state="normal")
         messagebox.showwarning(
             "Connection Lost",
             "The connection was stopped and a stop command was attempted. "
@@ -2127,7 +981,7 @@ class MonkeyDriveApp:
             return
 
         last_state = self._motor_states[-1]
-        self._reset_step_key_state()
+        self.shortcuts.reset_step_key_state()
         self._pause_motors([last_state.motor_id])
         if last_state.motor_id in self._notes_windows:
             self._notes_windows[last_state.motor_id]._on_close()
@@ -2142,218 +996,78 @@ class MonkeyDriveApp:
     # Control Actions
     # -------------------------------------------------------------------------
 
-    def _queue_motion(self, state: MotorState, command: str) -> bool:
-        """Track accepted RUN destinations for display, not hardware acknowledgement."""
-        accepted = self._serial_manager.send(command)
-        if accepted:
-            _name, args = SerialProtocol.parse_response(command)
-            target = float(args[2])
-            if abs(target - state.absolute) >= 0.0005:
-                self._motion_targets[state.motor_id] = target
-            else:
-                self._motion_targets.pop(state.motor_id, None)
-        else:
-            self._motion_targets.pop(state.motor_id, None)
-        return accepted
-
     def _refresh_running_indicators(self):
-        """Refresh changed badges on the existing Tk timer without changing motion state."""
-        connected = self._serial_manager.is_connected
-        for state, widgets in zip(self._motor_states, self._motor_widgets):
-            if not connected or not state.is_running:
-                self._motion_targets.pop(state.motor_id, None)
-            running = state.motor_id in self._motion_targets
+        """Render the controller's transient destination status on the Tk timer."""
+        for state, widgets in zip(self._motor_states, self.view.motor_widgets):
+            running = self.motion.is_moving(state)
             if widgets.get('motion_status_running') != running:
                 widgets['motion_status'].configure(
-                    text="Running" if running else "Idle",
-                    foreground="#15734a" if running else "#626e7d")
+                    text='Running' if running else 'Idle',
+                    foreground='#15734a' if running else '#626e7d')
                 widgets['motion_status_running'] = running
 
-    def _on_run(self):
-        """Handle Run button click."""
-        if not self._serial_manager.is_connected:
-            self._safe_popup(messagebox.showwarning, "Not Connected", "Console not connected.")
-            return
+    def _show_motion_error(self, error: MotionError):
+        popup = messagebox.showinfo if error.informational else messagebox.showwarning
+        self._safe_popup(popup, error.title, str(error))
 
+    def _movement_selection(self) -> Optional[list[MotorState]]:
+        """Check action availability and uncommitted position edits in the UI."""
         selected = self._selected_states()
-        if not selected:
-            self._safe_popup(messagebox.showinfo, "No Selection", "Select at least one motor.")
+        try:
+            self.motion.require_ready(selected)
+        except MotionError as error:
+            self._show_motion_error(error)
+            return None
+        return selected if self._validate_absolute_edits_closed(selected) else None
+
+    def _format_target_input(self, state: MotorState):
+        widgets = self.view.get_widgets(state.motor_id)
+        if widgets:
+            widgets['target_var'].set(format_mm(state.target))
+
+    def _on_run(self):
+        """Collect fields for Run Selected; the controller validates and queues."""
+        selected = self._movement_selection()
+        if selected is None:
             return
-
-        if not self._validate_absolute_edits_closed(selected):
-            return
-
-        if self._is_program_mode():
-            self._run_program_instructions(selected)
-            return
-
-        # Validation pass
-        for state in selected:
-            widgets = self._get_widgets(state.motor_id)
-            if not widgets:
-                continue
-
-            # Validate Speed Input
-            try:
-                s_val = float(widgets['speed_var'].get())
-                state.speed = s_val
-            except ValueError:
-                self._safe_popup(
-                    messagebox.showwarning, "Invalid Input",
-                    f"Invalid speed input for Motor {state.motor_id}."
-                )
-                return
-
-            # Validate Target Input
-            try:
-                t_val = float(widgets['target_var'].get())
-                state.target = round(t_val, 3)
-                widgets['target_var'].set(format_mm(state.target))
-            except ValueError:
-                self._safe_popup(
-                    messagebox.showwarning, "Invalid Input",
-                    f"Invalid target input for Motor {state.motor_id}."
-                )
-                return
-
-            # Range checks
-            if not (self._min_speed <= state.speed <= self._max_speed):
-                self._safe_popup(
-                    messagebox.showwarning, "Invalid Input",
-                    f"Speed must be between {self._min_speed}mm/s and "
-                    f"{self._max_speed}mm/s. See Motor {state.motor_id}."
-                )
-                return
-
-            if not (Config.MIN_TARGET_POS <= state.target <= Config.MAX_TARGET_POS):
-                self._safe_popup(
-                    messagebox.showwarning, "Invalid Input",
-                    f"Target must be between {Config.MIN_TARGET_POS}mm and "
-                    f"{Config.MAX_TARGET_POS}mm. See Motor {state.motor_id}."
-                )
-                return
-
-            if not (Config.MIN_ABSOLUTE_POS <= state.absolute <= Config.MAX_ABSOLUTE_POS):
-                self._safe_popup(
-                    messagebox.showwarning, "Invalid Input",
-                    f"Absolute position must be between {Config.MIN_ABSOLUTE_POS}mm and "
-                    f"{Config.MAX_ABSOLUTE_POS}mm. See Motor {state.motor_id}."
-                )
-                return
-
-        # Execution pass
-        for state in selected:
-            cmd = SerialProtocol.cmd_run(
-                state.motor_id, state.speed, state.target, state.absolute
-            )
-            state.is_running = self._queue_motion(state, cmd)
-
-    def _run_program_instructions(self, selected: list[MotorState]):
-        """Run or continue selected motors' active instructions."""
-        runnable: list[tuple[MotorState, InstructionStep]] = []
-        skipped_complete = 0
-
-        for state in selected:
-            if not state.instructions:
-                self._safe_popup(
-                    messagebox.showwarning,
-                    "Missing Instructions",
-                    f"Motor {state.motor_id} has no instructions."
-                )
-                return
-
-            if state.instruction_status == "complete":
-                skipped_complete += 1
-                continue
-
-            instruction = self._current_instruction(state)
-            if not instruction:
-                continue
-
-            if not (self._min_speed <= instruction.speed <= self._max_speed):
-                self._safe_popup(
-                    messagebox.showwarning,
-                    "Invalid Instructions",
-                    f"Motor {state.motor_id} instruction speed is outside the current settings range."
-                )
-                return
-            if not (Config.MIN_TARGET_POS <= instruction.target <= Config.MAX_TARGET_POS):
-                self._safe_popup(
-                    messagebox.showwarning,
-                    "Invalid Instructions",
-                    f"Motor {state.motor_id} instruction target is outside the allowed range."
-                )
-                return
-
-            runnable.append((state, instruction))
-
-        if not runnable and skipped_complete:
-            return
-
-        for state, instruction in runnable:
-            self._activate_program_instruction(state, instruction)
-            cmd = SerialProtocol.cmd_run(
-                state.motor_id, state.speed, state.target, state.absolute
-            )
-            state.is_running = self._queue_motion(state, cmd)
-            state.instruction_status = "running" if state.is_running else "paused"
-            self._update_program_row(state.motor_id)
+        try:
+            if self.view.is_program_mode():
+                self.motion.run_program(selected, self._min_speed, self._max_speed)
+            else:
+                moves = []
+                for state in selected:
+                    widgets = self.view.get_widgets(state.motor_id)
+                    speed = widgets['speed_var'].get() if widgets else state.speed
+                    target = widgets['target_var'].get() if widgets else state.target
+                    moves.append(TargetMove(state, speed, target))
+                self.motion.run_targets(moves, self._min_speed, self._max_speed)
+        except MotionError as error:
+            self._show_motion_error(error)
 
     def _on_step(self, direction: int):
-        """Move selected motors by one global step."""
-        if not self._serial_manager.is_connected:
-            self._safe_popup(messagebox.showwarning, "Not Connected", "Console not connected.")
+        """Read shared step fields and request a selected-drive increment."""
+        selected = self._movement_selection()
+        if selected is None:
             return
-
-        selected = self._selected_states()
-        if not selected:
-            self._safe_popup(messagebox.showinfo, "No Selection", "Select at least one motor.")
+        settings = self._parse_step_settings()
+        if settings is None:
             return
-
-        if not self._validate_absolute_edits_closed(selected):
+        try:
+            self.motion.step(selected, direction, *settings)
+        except MotionError as error:
+            self._show_motion_error(error)
             return
-
-        step_settings = self._parse_step_settings()
-        if not step_settings:
-            return
-
-        speed, step_size = step_settings
-        target_updates = []
-
-        for state in selected:
-            target = round(state.absolute + (direction * step_size), 3)
-            if not (Config.MIN_TARGET_POS <= target <= Config.MAX_TARGET_POS):
-                self._safe_popup(
-                    messagebox.showwarning, "Invalid Step",
-                    f"Motor {state.motor_id} step target would be {target:.3f}mm, "
-                    f"outside the {Config.MIN_TARGET_POS}-{Config.MAX_TARGET_POS}mm range."
-                )
-                return
-            target_updates.append((state, target))
-
-        for state, target in target_updates:
-            self._step_targets[state.motor_id] = target
-            cmd = SerialProtocol.cmd_run(state.motor_id, speed, target, state.absolute)
-            state.is_running = self._queue_motion(state, cmd)
-
         self._focus_main_window()
 
     def _on_pause(self):
         """Handle Pause button click."""
-        self._reset_step_key_state()
+        self.shortcuts.reset_step_key_state()
         self._pause_motors(state.motor_id for state in self._selected_states())
 
     def _on_stop_all(self):
-        """Stop every controller drive, regardless of selection or GUI flags."""
-        self._serial_manager.send(SerialProtocol.cmd_pause_all())
-        self._reset_step_key_state()
-        for state in [*self._motor_states, *self._hidden_motor_states.values()]:
-            state.is_running = False
-            if state.instruction_status == 'running':
-                state.instruction_status = 'paused'
-                self._update_program_row(state.motor_id)
-        self._motion_targets.clear()
-        self._step_targets.clear()
+        """Pause every controller drive and cancel any held keyboard gesture."""
+        self.motion.pause_all([*self._motor_states, *self._hidden_motor_states.values()])
+        self.shortcuts.reset_step_key_state()
         self._refresh_running_indicators()
 
     def _on_zero(self):
@@ -2369,7 +1083,7 @@ class MonkeyDriveApp:
             return
         state.relative_zero_point = state.absolute
         state.relative = 0.0
-        widgets = self._get_widgets(motor_id)
+        widgets = self.view.get_widgets(motor_id)
         if widgets:
             widgets['relative_var'].set("0.000")
 
@@ -2433,7 +1147,7 @@ class MonkeyDriveApp:
             recent_programs,
             self._load_program_file,
         )
-        self._style_widget_tree(window)
+        self.view.style_widget_tree(window)
         window.grab_set()
 
     def _load_program_file(self, filepath: str):
@@ -2546,7 +1260,7 @@ class MonkeyDriveApp:
                 state.is_running = False
             state.instruction_index = 0
             state.instruction_status = "idle"
-            self._step_targets.pop(state.motor_id, None)
+            self.motion.step_targets.pop(state.motor_id, None)
             self._update_program_row(state.motor_id)
 
         self._save_state()
@@ -2573,7 +1287,7 @@ class MonkeyDriveApp:
         for state in selected:
             if state.is_running:
                 self._serial_manager.send(SerialProtocol.cmd_pause(state.motor_id))
-            self._step_targets.pop(state.motor_id, None)
+            self.motion.step_targets.pop(state.motor_id, None)
 
         # Clear values for selected motors
         for state in selected:
@@ -2588,7 +1302,7 @@ class MonkeyDriveApp:
             state.instruction_index = 0
             state.instruction_status = "idle"
 
-            widgets = self._get_widgets(state.motor_id)
+            widgets = self.view.get_widgets(state.motor_id)
             if widgets:
                 if 'speed_var' in widgets:
                     widgets['speed_var'].set("")
@@ -2609,67 +1323,23 @@ class MonkeyDriveApp:
     # -------------------------------------------------------------------------
 
     def _on_position_update(self, motor_id: int, absolute: float):
-        """Apply a queued position update on the Tk thread."""
+        """Apply reported position through the controller, then refresh the view."""
         state = self._get_state(motor_id) or self._hidden_motor_states.get(motor_id)
         if state:
-            target = self._motion_targets.get(motor_id)
-            if target is not None and abs(absolute - target) < 0.0005:
-                self._motion_targets.pop(motor_id, None)
-            state.absolute = round(absolute, 3)
-            state.relative = round(state.absolute - state.relative_zero_point, 3)
-            if not state.is_running:
-                self._step_targets.pop(motor_id, None)
-
+            self.motion.apply_position(state, absolute)
         self._update_position_display(motor_id, absolute)
 
     def _update_position_display(self, motor_id: int, absolute: float):
         """Update position display widgets on main thread."""
         state = self._get_state(motor_id)
-        widgets = self._get_widgets(motor_id)
+        widgets = self.view.get_widgets(motor_id)
         if state and widgets:
-            self._advance_program_if_ready(state)
+            self.motion.advance_program(state)
             if widgets['absolute_entry']['state'] == 'readonly':
                 widgets['absolute_var'].set(format_mm(state.absolute))
             if widgets['relative_entry']['state'] == 'readonly':
                 widgets['relative_var'].set(format_mm(state.relative))
             self._update_trajectory_motor_position(motor_id)
-
-    def _advance_program_if_ready(self, state: MotorState):
-        """Advance one motor's instructions when the current target is reached."""
-        if state.instruction_status != "running" or not state.instructions:
-            return
-
-        instruction = self._current_instruction(state)
-        if not instruction:
-            return
-
-        if abs(state.absolute - instruction.target) > Config.PROGRAM_TARGET_TOLERANCE_MM:
-            return
-
-        if state.instruction_index + 1 >= len(state.instructions):
-            state.is_running = False
-            state.instruction_status = "complete"
-            self._update_program_row(state.motor_id)
-            return
-
-        state.instruction_index += 1
-        next_instruction = self._current_instruction(state)
-        if next_instruction:
-            self._activate_program_instruction(state, next_instruction)
-        self._update_program_row(state.motor_id)
-        if not next_instruction or not self._serial_manager.is_connected:
-            return
-
-        cmd = SerialProtocol.cmd_run(
-            state.motor_id,
-            state.speed,
-            state.target,
-            state.absolute,
-        )
-        state.is_running = self._queue_motion(state, cmd)
-        if not state.is_running:
-            state.instruction_status = "paused"
-            self._update_program_row(state.motor_id)
 
     def _update_trajectory_motor_position(self, motor_id: int):
         """Notify an open trajectory viewer that its motor position changed."""
@@ -2741,11 +1411,11 @@ class MonkeyDriveApp:
         data = {
             'motor_states': [s.to_dict() for s in self._motor_states],
             'hidden_motor_states': [s.to_dict() for s in self._hidden_motor_states.values()],
-            'port': self._port_var.get() if self._port_var else self._saved_port,
-            'mode': self._mode_var.get() if self._mode_var else self._saved_mode,
-            'compact_view': self._compact_view_var.get(),
-            'step_speed': self._step_speed_var.get() if self._step_speed_var else f"{self._saved_step_speed:g}",
-            'step_size': self._step_size_var.get() if self._step_size_var else format_mm(self._saved_step_size),
+            'port': self.view.port_var.get() if self.view.port_var else self._saved_port,
+            'mode': self.view.mode_var.get() if self.view.mode_var else self._saved_mode,
+            'compact_view': self.view.compact_view_var.get(),
+            'step_speed': self.view.step_speed_var.get() if self.view.step_speed_var else f"{self._saved_step_speed:g}",
+            'step_size': self.view.step_size_var.get() if self.view.step_size_var else format_mm(self._saved_step_size),
             'min_speed': self._min_speed,
             'max_speed': self._max_speed,
             'backlash': round(self._backlash, 3),
@@ -2764,7 +1434,7 @@ class MonkeyDriveApp:
     def _set_config_busy(self, busy):
         self._config_busy = busy
         for index in (0, 1):
-            self._config_menu.entryconfigure(index, state='disabled' if busy else 'normal')
+            self.view.config_menu.entryconfigure(index, state='disabled' if busy else 'normal')
 
     def _config_task(self, compute, complete):
         if self._config_worker is None:
@@ -2775,7 +1445,7 @@ class MonkeyDriveApp:
     def _on_save_config(self):
         if self._config_busy:
             return
-        self._reset_step_key_state()
+        self.shortcuts.reset_step_key_state()
         path = self._safe_popup(
             filedialog.asksaveasfilename, 'Save Config', parent=self._root,
             defaultextension='.json', filetypes=[('MonkeyDrive config', '*.json')],
@@ -2798,7 +1468,7 @@ class MonkeyDriveApp:
     def _on_load_config(self):
         if self._config_busy:
             return
-        self._reset_step_key_state()
+        self.shortcuts.reset_step_key_state()
         path = self._safe_popup(
             filedialog.askopenfilename, 'Load Config', parent=self._root,
             filetypes=[('MonkeyDrive config', '*.json')])
@@ -2814,9 +1484,9 @@ class MonkeyDriveApp:
                 return
             # Disconnect clears queued positions and commands; do not allow a
             # late hardware update to overwrite restored coordinates.
-            self._reset_step_key_state()
+            self.shortcuts.reset_step_key_state()
             self._serial_manager.disconnect()
-            self._connect_btn.configure(text='Disconnecting...', state='disabled')
+            self.view.connect_btn.configure(text='Disconnecting...', state='disabled')
             self._finish_config_load(workspace)
         self._config_task(lambda: read_config(path), complete)
 
@@ -2854,7 +1524,7 @@ class MonkeyDriveApp:
         if self._settings_window:
             self._settings_window.destroy()
             self._settings_window = None
-        for row in self._motor_widgets:
+        for row in self.view.motor_widgets:
             for widget in row['all_widgets']:
                 widget.unbind('<FocusOut>')
         self._motor_states = [MotorState.from_dict(item) for item in data['motor_states']]
@@ -2862,8 +1532,8 @@ class MonkeyDriveApp:
                                      for item in data.get('hidden_motor_states', [])}
         self._trajectory_revisions.clear()
         self._trajectory_roster = ()
-        self._step_targets.clear()
-        self._motion_targets.clear()
+        self.motion.step_targets.clear()
+        self.motion.motion_targets.clear()
         self._saved_mode, self._saved_port = data['mode'], data['port']
         self._saved_compact_view = data.get('compact_view', False)
         self._saved_step_speed, self._saved_step_size = data['step_speed'], data['step_size']
@@ -2873,13 +1543,13 @@ class MonkeyDriveApp:
         self._anatomy_orientation_actual = data['anatomy_orientation_actual']
         self._anatomy_orientation_scanner = data['anatomy_orientation_scanner']
         self._recent_programs = data['recent_programs']
-        self._port_var.set(self._saved_port)
-        self._step_speed_var.set(f'{self._saved_step_speed:g}')
-        self._step_size_var.set(format_mm(self._saved_step_size))
-        self._connect_btn.configure(text='Connect', state='normal')
-        self._connection_text.set('Disconnected')
+        self.view.port_var.set(self._saved_port)
+        self.view.step_speed_var.set(f'{self._saved_step_speed:g}')
+        self.view.step_size_var.set(format_mm(self._saved_step_size))
+        self.view.connect_btn.configure(text='Connect', state='normal')
+        self.view.connection_text.set('Disconnected')
         self._select_mode(self._saved_mode)
-        self._set_compact_view(self._saved_compact_view, remember=False)
+        self.view.set_compact_view(self._saved_compact_view, remember=False)
         self._refresh_trajectory_buttons()
         self._refresh_running_indicators()
         self._save_state()
@@ -2975,7 +1645,7 @@ class MonkeyDriveApp:
         if self._config_load_job is not None:
             self._root.after_cancel(self._config_load_job)
             self._config_load_job = None
-        self._reset_step_key_state()
+        self.shortcuts.reset_step_key_state()
         self._serial_manager.disconnect()
         self._shutdown_deadline = time.monotonic() + Config.SERIAL_SHUTDOWN_TIMEOUT
         self._finish_close()

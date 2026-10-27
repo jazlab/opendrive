@@ -169,3 +169,6 @@ heartbeat does not resume the interrupted movement; a new Run command is require
 The desktop entry point is
 [`software/monkeydrive_gui.py`](software/monkeydrive_gui.py); supporting modules
 are in [`software/monkeydrive/`](software/monkeydrive/).
+
+For the code layout, control flow, and test commands, see the
+[developer guide](docs/development.md).

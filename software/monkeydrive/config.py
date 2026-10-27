@@ -61,7 +61,7 @@ class Config:
     COLOR_MODE_TAB_BG: str = "#d9d9d9"
 
     # Column Weights and Min Sizes for Grid Layout
-    # Col 0: Buttons/ID | Col 1: Speed | Col 2: Target | Col 3: Abs | Col 4: Rel | Col 5: Notes
+    # Target mode: Drive | Absolute | Relative | Target | Speed | Notes | Zero.
     COL_MIN_WIDTHS: tuple = (205, 100, 100, 100, 100, 150, 80)
     STEP_COL_MIN_WIDTHS: tuple = (205, 120, 120, 150, 80)
     PROGRAM_COL_MIN_WIDTHS: tuple = (205, 140, 80, 100, 100, 100, 100, 150, 80)
