@@ -15,7 +15,7 @@ hardware.
 | Codebase | Location | Use it for |
 | --- | --- | --- |
 | **MonkeyDrive (primary)** | [`software/`](software/) and [`firmware/`](firmware/) | The full application, including movement programs, MRI/trajectory tools, and SpikeGLX integration. Follow the instructions below. |
-| **MonkeyDrive Lite** | [`lite/`](lite/) | Basic motor control, position tracking, notes, and export, without MRI or SpikeGLX integration. Follow the [Lite setup guide](lite/README.md) and use its matching firmware. |
+| **MonkeyDrive Lite** | [`lite/`](lite/) | Use for basic motor control and position tracking, without movement programs, MRI/trajectory tools, and SpikeGLX integration. Follow the [Lite setup guide](lite/README.md) and use its matching firmware. |
 
 The two codebases are separate alternatives. The primary application remains at
 its existing paths; Lite includes its own GUI, dependencies, and firmware.
