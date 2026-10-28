@@ -16,7 +16,7 @@ font fallbacks work offline.
 
 ## Publish with GitHub Pages
 
-The website URL is `https://jazlab.github.io/MonkeyDrive/`. Publishing uses the
+The website URL is `https://jazlab.github.io/monkeydrive/`. Publishing uses the
 **Publish project website** GitHub Actions workflow and is started manually;
 pushing or merging changes does not deploy the site automatically.
 

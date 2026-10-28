@@ -6,7 +6,7 @@ This repository contains the MonkeyDrive software and firmware. The MonkeyDrive 
 
 ## Project resources
 
-- [Project website](https://jazlab.github.io/MonkeyDrive/): overview of the MonkeyDrive system and project highlights.
+- [Project website](https://jazlab.github.io/monkeydrive/): overview of the MonkeyDrive system and project highlights.
 - **Paper**: write-up on the system design and validation.
 - [Paper reproducibility](https://github.com/jazlab/monkeydrive_paper): data and code to reproduce the figures in the paper.
 - [MonkeyDrive chatbot](https://notebook.google.com/notebook/b31beb9a-0dcf-4763-a446-20673b686bbd/preview): ask questions about building and using MonkeyDrive. Google sign-in required.
@@ -37,8 +37,8 @@ Clone the repository, then run the commands for your operating system from the
 repository folder.
 
 ```sh
-git clone https://github.com/jazlab/MonkeyDrive.git
-cd MonkeyDrive
+git clone https://github.com/jazlab/monkeydrive.git
+cd monkeydrive
 ```
 
 ### Windows — PowerShell
