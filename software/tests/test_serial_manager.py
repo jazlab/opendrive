@@ -12,7 +12,12 @@ from monkeydrive.serial_manager import SerialManager
 
 
 class FakePort:
+    firmware_reply = (Config.FIRMWARE_PRODUCT, Config.FIRMWARE_VARIANT, Config.FIRMWARE_VERSION)
+    firmware_delay_queries = 0
+    firmware_checksum_valid = True
+
     def __init__(self, **kwargs):
+        self.firmware_queries = 0
         self.kwargs = kwargs
         self.owner = threading.get_ident()
         self.writes = []
@@ -64,6 +69,13 @@ class FakePort:
         self.writes.append(payload.decode())
         if cmd == 'HEARTBEAT' and self.ack:
             self.inject(P.create_command('HEARTBEAT_ACK'))
+        if cmd == 'GET_FIRMWARE':
+            self.firmware_queries += 1
+            if self.firmware_reply is not None and self.firmware_queries > self.firmware_delay_queries:
+                reply = P.create_command('FIRMWARE', *self.firmware_reply)
+                if not self.firmware_checksum_valid:
+                    reply = reply[:-3] + 'ZZ\n'
+                self.inject(reply)
         return len(payload)
 
     def flush(self):
@@ -90,6 +102,8 @@ class SerialReliabilityTests(unittest.TestCase):
             patch.object(Config, 'GUI_WATCHDOG_TIMEOUT', .2),
             patch.object(Config, 'SERIAL_WRITE_TIMEOUT', .15),
             patch.object(Config, 'SERIAL_READ_INTERVAL', .002),
+            patch.object(Config, 'FIRMWARE_CHECK_TIMEOUT', .15),
+            patch.object(Config, 'FIRMWARE_QUERY_INTERVAL', .02),
         ]
         for p in self.patches:
             p.start()
@@ -137,6 +151,109 @@ class SerialReliabilityTests(unittest.TestCase):
         self.assertTrue(self.manager.connect('fake'))
         self.wait_for(lambda: self.manager.is_connected)
         return self.ports[-1]
+
+    def test_connection_waits_for_verified_firmware(self):
+        with patch.object(FakePort, 'firmware_reply', None):
+            self.assertTrue(self.manager.connect('fake'))
+            self.wait_for(lambda: self.ports and self.ports[0].firmware_queries > 0)
+            port = self.ports[0]
+            self.assertFalse(self.manager.is_connected)
+            self.assertFalse(self.manager.send(P.cmd_run(1, .01, 1, 0)))
+            self.assertFalse(self.manager.send(P.cmd_update_target(1, 2)))
+            self.assertNotIn(('connected',), self.callbacks)
+            port.firmware_reply = (Config.FIRMWARE_PRODUCT, Config.FIRMWARE_VARIANT,
+                                   Config.FIRMWARE_VERSION)
+            self.wait_for(lambda: self.manager.is_connected)
+        self.assertEqual(self.callbacks.count(('connected',)), 1)
+        self.assertFalse(any(x.startswith(('RUN', 'TARGET', 'CONFIG')) for x in port.writes))
+
+    def test_incompatible_firmware_never_enables_motion(self):
+        other = 'lite' if Config.FIRMWARE_VARIANT == 'full' else 'full'
+        for reply in [(Config.FIRMWARE_PRODUCT, other, Config.FIRMWARE_VERSION),
+                      (Config.FIRMWARE_PRODUCT, Config.FIRMWARE_VARIANT, '0.9.0'),
+                      ('OtherDevice', Config.FIRMWARE_VARIANT, Config.FIRMWARE_VERSION),
+                      (Config.FIRMWARE_PRODUCT,)]:
+            with self.subTest(reply=reply), patch.object(FakePort, 'firmware_reply', reply):
+                self.callbacks.clear()
+                self.assertTrue(self.manager.connect('fake'))
+                self.wait_for(lambda: not self.manager.is_busy)
+                self.assertFalse(self.manager.is_connected)
+                self.assertFalse(self.manager.send(P.cmd_run(1, .01, 1, 0)))
+                self.assertEqual(self.manager.failure_kind, 'firmware')
+                self.assertIn(Config.FIRMWARE_SKETCH, self.manager.failure_reason)
+                self.assertIn('Detected:', self.manager.failure_reason)
+                self.assertNotIn(('connected',), self.callbacks)
+                self.assertEqual(self.callbacks.count(('lost',)), 1)
+                self.assertFalse(any(x.startswith(('RUN', 'TARGET', 'CONFIG'))
+                                     for x in self.ports[-1].writes))
+
+    def test_legacy_firmware_warns_even_when_heartbeats_work(self):
+        with patch.object(FakePort, 'firmware_reply', None):
+            self.assertTrue(self.manager.connect('fake'))
+            self.wait_for(lambda: not self.manager.is_busy)
+        self.assertEqual(self.manager.failure_kind, 'firmware')
+        self.assertIn('did not report a firmware version', self.manager.failure_reason)
+        self.assertTrue(self.ports[-1].closed)
+        self.assertNotIn(('connected',), self.callbacks)
+
+    def test_bad_checksum_cannot_verify_firmware(self):
+        with patch.object(FakePort, 'firmware_checksum_valid', False):
+            self.assertTrue(self.manager.connect('fake'))
+            self.wait_for(lambda: not self.manager.is_busy)
+        self.assertEqual(self.manager.failure_kind, 'firmware')
+        self.assertNotIn(('connected',), self.callbacks)
+
+    def test_initial_stop_position_is_delivered_after_verification(self):
+        original_write = FakePort.write
+        def initial_position(port, payload):
+            result = original_write(port, payload)
+            if payload.startswith(b'PAUSE_ALL'):
+                port.inject(P.create_command('POS', 1, 3.125))
+            return result
+        with patch.object(FakePort, 'write', initial_position):
+            self.connect()
+            self.wait_for(lambda: ('position', 1, 3.125) in self.callbacks)
+        self.assertLess(self.callbacks.index(('connected',)),
+                        self.callbacks.index(('position', 1, 3.125)))
+
+    def test_firmware_identity_without_heartbeat_ack_cannot_connect(self):
+        original_write = FakePort.write
+        def no_ack(port, payload):
+            port.ack = False
+            return original_write(port, payload)
+        with patch.object(FakePort, 'write', no_ack):
+            self.assertTrue(self.manager.connect('fake'))
+            self.wait_for(lambda: not self.manager.is_busy)
+        self.assertFalse(self.manager.is_connected)
+        self.assertIn('heartbeat', self.manager.failure_reason)
+        self.assertNotIn(('connected',), self.callbacks)
+        self.assertFalse(self.manager.send(P.cmd_run(1, .01, 1, 0)))
+
+    def test_firmware_query_is_retried(self):
+        with patch.object(FakePort, 'firmware_delay_queries', 1):
+            port = self.connect()
+        self.assertGreaterEqual(port.firmware_queries, 2)
+        self.assertEqual(self.callbacks.count(('connected',)), 1)
+
+    def test_reconnect_rechecks_firmware(self):
+        self.connect()
+        self.manager.disconnect()
+        self.wait_for(lambda: not self.manager.is_busy)
+        self.callbacks.clear()
+        with patch.object(FakePort, 'firmware_reply', None):
+            self.assertTrue(self.manager.connect('fake'))
+            self.wait_for(lambda: not self.manager.is_busy)
+        self.assertEqual(self.manager.failure_kind, 'firmware')
+        self.assertNotIn(('connected',), self.callbacks)
+
+    def test_disconnect_cancels_firmware_check_without_warning(self):
+        with patch.object(FakePort, 'firmware_reply', None):
+            self.assertTrue(self.manager.connect('fake'))
+            self.wait_for(lambda: self.ports and self.ports[0].firmware_queries > 0)
+            self.manager.disconnect()
+            self.wait_for(lambda: not self.manager.is_busy)
+        self.assertEqual(self.callbacks, [])
+        self.assertTrue(self.ports[-1].closed)
 
     def test_open_and_disconnect_never_wait_on_driver(self):
         self.open_gate = threading.Event()

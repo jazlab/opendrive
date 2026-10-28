@@ -3,6 +3,14 @@
 class Config:
     """Global configuration parameters for the MonkeyDrive system."""
 
+    # Firmware compatibility contract; keep in sync with the matching sketch.
+    FIRMWARE_PRODUCT: str = "MonkeyDrive"
+    FIRMWARE_VARIANT: str = "full"
+    FIRMWARE_VERSION: str = "1.0.0"
+    FIRMWARE_CHECK_TIMEOUT: float = 2.0
+    FIRMWARE_QUERY_INTERVAL: float = 0.25
+    FIRMWARE_SKETCH: str = "firmware/monkeydrive_firmware/monkeydrive_firmware.ino"
+
     # Serial communication
     BAUD_RATE: int = 115200
     SERIAL_TIMEOUT: float = 0.1

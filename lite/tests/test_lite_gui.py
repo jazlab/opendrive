@@ -1,4 +1,5 @@
 """Exercise Lite's Tk integration without hardware or persistent user state."""
+import gc
 import importlib.util
 from pathlib import Path
 import sys
@@ -32,6 +33,8 @@ class LiteGuiTests(unittest.TestCase):
         for item in self.patches:
             item.start()
         self.app = gui.MonkeyDriveApp()
+        self.callback_errors = []
+        self.app.root.report_callback_exception = lambda *error: self.callback_errors.append(error)
         self.app.root.withdraw()
         self.app._port_var.set('FAKE')
 
@@ -71,6 +74,11 @@ class LiteGuiTests(unittest.TestCase):
             pass
         for item in reversed(self.patches):
             item.stop()
+        self.assertEqual(self.callback_errors, [])
+        # Collect destroyed Tk objects on their owner thread before the next
+        # serial worker can trigger cyclic garbage collection.
+        self.app = None
+        gc.collect()
 
     def test_opening_port_keeps_tk_responsive(self):
         self.open_gate = threading.Event()
@@ -108,6 +116,22 @@ class LiteGuiTests(unittest.TestCase):
         self.app._on_pause()
         self.assertLess(time.monotonic() - start, .1)
         self.assertFalse(state.is_running)
+
+    def test_firmware_warning_identifies_update_and_correct_sketch(self):
+        for reply in [None, (gui.Config.FIRMWARE_PRODUCT, 'full', gui.Config.FIRMWARE_VERSION)]:
+            with self.subTest(reply=reply), patch.object(FakePort, 'firmware_reply', reply), \
+                    patch.object(gui.Config, 'FIRMWARE_CHECK_TIMEOUT', .12), \
+                    patch.object(gui.messagebox, 'showwarning') as warning:
+                self.app._on_connect()
+                self.pump_until(lambda: warning.called)
+                self.pump_until(lambda: not self.app.serial_manager.is_busy)
+                title, message = warning.call_args.args
+                self.assertEqual(title, 'Firmware Update Required')
+                self.assertIn(gui.Config.FIRMWARE_SKETCH, message)
+                self.assertIn('Movement is disabled', message)
+                self.assertFalse(self.app.serial_manager.is_connected)
+                self.assertEqual(self.app._connect_btn.cget('text'), 'Connect')
+                self.assertEqual(warning.call_count, 1)
 
     def test_failed_open_restores_connect_button(self):
         with patch('serial_manager.serial.Serial', side_effect=OSError('simulated unplug')):

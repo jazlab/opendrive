@@ -64,6 +64,24 @@ when changing keyboard handling.
 
 ## Threads and processes
 
+### Firmware compatibility
+
+Before a connection becomes usable, the worker sends `GET_FIRMWARE` and requires
+a checksummed `FIRMWARE,MonkeyDrive,full,1.0.0` response (Lite uses `lite` instead
+of `full`), plus a heartbeat acknowledgement. Queries are retried for up to two
+seconds. A mismatch or missing version closes the connection and queues a
+firmware warning for Tk; RUN, TARGET, and CONFIG cannot be queued during this check.
+Reconnect always repeats verification. The identity query does not renew the
+controller's heartbeat or authorize motion.
+
+Keep `FIRMWARE_PRODUCT`, `FIRMWARE_VARIANT`, and `FIRMWARE_VERSION` in the GUI
+configuration and matching sketch synchronized. The version is an exact
+compatibility contract: bump it when firmware changes require a different GUI
+or invalidate the behavior expected by an existing GUI. Full and Lite remain
+self-contained and have separate identities.
+
+### Ownership
+
 - The application, console view, shortcuts, motion controller, and serial callbacks run on Tk's
   main thread. Widget access belongs on this thread.
 - `SerialManager` owns the serial port on one worker thread. GUI actions queue

@@ -30,6 +30,7 @@ class _Session:
     last_gui_tick: float = field(default_factory=time.monotonic)
     connected: bool = False
     failure: str = ""
+    failure_kind: str = "connection"
     thread: Optional[threading.Thread] = None
 
 
@@ -69,6 +70,23 @@ class SerialManager:
             return ""
         with session.lock:
             return session.failure
+
+    @property
+    def failure_kind(self) -> str:
+        session = self._session
+        if session is None:
+            return "connection"
+        with session.lock:
+            return session.failure_kind
+
+    @staticmethod
+    def _firmware_warning(detected: str) -> str:
+        return (
+            f"Expected {Config.FIRMWARE_PRODUCT} {Config.FIRMWARE_VARIANT} firmware "
+            f"{Config.FIRMWARE_VERSION}.\n{detected}\n\n"
+            f"Upload {Config.FIRMWARE_SKETCH} from this version of the repository, "
+            "then reconnect. Movement is disabled until compatible firmware is verified."
+        )
 
     @staticmethod
     def list_ports() -> list:
@@ -175,10 +193,11 @@ class SerialManager:
             raise RuntimeError("Serial lifecycle and event polling belong to the GUI thread")
 
     @staticmethod
-    def _fail_locked(session: _Session, reason: str):
+    def _fail_locked(session: _Session, reason: str, kind: str = "connection"):
         if session.stop.is_set():
             return
         session.failure = reason
+        session.failure_kind = kind
         session.connected = False
         session.commands.clear()
         session.positions.clear()
@@ -210,11 +229,15 @@ class SerialManager:
                 if now - session.last_gui_tick > Config.GUI_WATCHDOG_TIMEOUT:
                     self._fail_locked(session, "Control window stopped responding")
                     return
-                session.connected = True
-                session.events.append("connected")
-            last_ack = now
+            # Opening a port does not grant movement permission. Verify the
+            # firmware and receive a heartbeat ACK before notifying the GUI.
+            handshake_started = now
+            firmware_verified = False
+            last_ack = None
+            next_firmware_query = now
             next_heartbeat = now
             buffer = b""
+            pending_positions = {}
             while not session.stop.is_set():
                 session.wake.clear()
                 with session.lock:
@@ -230,7 +253,16 @@ class SerialManager:
                     if not parsed:
                         continue
                     cmd, args = parsed
-                    if cmd == "HEARTBEAT_ACK":
+                    if cmd == "FIRMWARE":
+                        expected = [Config.FIRMWARE_PRODUCT, Config.FIRMWARE_VARIANT,
+                                    Config.FIRMWARE_VERSION]
+                        if args != expected:
+                            with session.lock:
+                                self._fail_locked(session, self._firmware_warning(
+                                    "Detected: " + ", ".join(args)[:160]), "firmware")
+                            break
+                        firmware_verified = True
+                    elif cmd == "HEARTBEAT_ACK":
                         last_ack = time.monotonic()
                     elif cmd == "POS" and len(args) >= 2:
                         try:
@@ -239,18 +271,31 @@ class SerialManager:
                             continue
                         if (1 <= motor_id <= Config.MAX_MOTORS and math.isfinite(position)
                                 and Config.MIN_ABSOLUTE_POS <= position <= Config.MAX_ABSOLUTE_POS):
-                            with session.lock:
-                                session.positions[motor_id] = position
+                            pending_positions[motor_id] = position
                 if len(buffer) > Config.SERIAL_RECEIVE_LIMIT:
                     raise serial.SerialException("Oversized serial response")
                 now = time.monotonic()
                 with session.lock:
-                    if now - last_ack > Config.HEARTBEAT_TIMEOUT:
+                    if (not firmware_verified
+                            and now - handshake_started > Config.FIRMWARE_CHECK_TIMEOUT):
+                        self._fail_locked(session, self._firmware_warning(
+                            "The controller did not report a firmware version. It may have "
+                            "older firmware installed, or the selected port may be incorrect."),
+                            "firmware")
+                    elif ((last_ack is not None and now - last_ack > Config.HEARTBEAT_TIMEOUT)
+                          or (firmware_verified and last_ack is None
+                              and now - handshake_started > Config.HEARTBEAT_TIMEOUT)):
                         self._fail_locked(session, "Controller heartbeat timed out")
                     if now - session.last_gui_tick > Config.GUI_WATCHDOG_TIMEOUT:
                         self._fail_locked(session, "Control window stopped responding")
                     if session.stop.is_set():
                         break
+                    if firmware_verified and last_ack is not None and not session.connected:
+                        session.connected = True
+                        session.events.append("connected")
+                    if session.connected:
+                        session.positions.update(pending_positions)
+                        pending_positions.clear()
                     command = None
                     if session.pauses:
                         motor_id = session.pauses.pop()
@@ -266,6 +311,9 @@ class SerialManager:
                     if now - session.last_gui_tick > Config.GUI_WATCHDOG_TIMEOUT:
                         self._fail_locked(session, "Control window stopped responding")
                     alive = not session.stop.is_set()
+                if alive and not firmware_verified and now >= next_firmware_query:
+                    self._write(port, SerialProtocol.cmd_firmware_info())
+                    next_firmware_query = time.monotonic() + Config.FIRMWARE_QUERY_INTERVAL
                 if alive and now >= next_heartbeat:
                     self._write(port, SerialProtocol.cmd_heartbeat())
                     next_heartbeat = time.monotonic() + Config.HEARTBEAT_INTERVAL

@@ -70,6 +70,11 @@ class SerialProtocol:
         return SerialProtocol.create_command("PAUSE_ALL")
 
     @staticmethod
+    def cmd_firmware_info() -> str:
+        """Request the firmware product, variant, and compatibility version."""
+        return SerialProtocol.create_command("GET_FIRMWARE")
+
+    @staticmethod
     def cmd_heartbeat() -> str:
         """Create HEARTBEAT command for connection monitoring."""
         return SerialProtocol.create_command("HEARTBEAT")
