@@ -1,6 +1,6 @@
 # MonkeyDrive
 
-**MonkeyDrive: An open-source microdrive system for neuroscience experiments**
+**MonkeyDrive: An open-source microdrive system for primate neurophysiology**
 
 This repository contains the MonkeyDrive software and firmware. The MonkeyDrive system controls motorized microdrives for positioning neural probes during neuroscience experiments. Its desktop interface supports up to six drives, with tools for movement programs, MRI-based trajectory planning, and SpikeGLX integration.
 
