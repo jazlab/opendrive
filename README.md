@@ -22,9 +22,9 @@ its existing paths; Lite includes its own GUI, dependencies, and firmware.
 
 ## Project resources
 
-- [Paper code and data](https://github.com/jazlab/monkeydrive_paper): reproduce Figures 3 and 4 (private during release preparation).
-- [Project documentation](https://docs.google.com/document/d/1CwdIq8lv9Gtcey1GMihnH131U_tzeRZlZ0cmyOJbvFY/edit): hardware, assembly, and user manuals.
-- [Website source](site/index.html) and [preview/publishing instructions](docs/website.md). The planned website is <https://jazlab.github.io/MonkeyDrive/>; publishing is disabled during release preparation.
+- [Paper code and data](https://github.com/jazlab/monkeydrive_paper): reproduce paper results.
+- [Project documentation](https://docs.google.com/document/d/1CwdIq8lv9Gtcey1GMihnH131U_tzeRZlZ0cmyOJbvFY/edit): User manuals, hardware files, assembly instructions, bill of materials, and quality control testing..
+- [Website source](site/index.html) and [preview/publishing instructions](docs/website.md). The MonkeyDrive website is <https://jazlab.github.io/MonkeyDrive/>.
 
 ## What you need
 
