@@ -45,6 +45,6 @@ Read the [MonkeyDrive documentation](https://docs.google.com/document/d/1CwdIq8l
 
 - `software/monkeydrive_gui.py`: Python/Tkinter GUI; `pyserial` is its external Python dependency.
 - `firmware/monkeydrive_firmware/monkeydrive_firmware.ino`: matching Teensy 4.0 firmware.
-- `LICENSE`: MIT License, retained with the supplied Lite code.
+- [Root MIT License](../LICENSE): covers the Lite GUI and firmware.
 
 The source files are preserved from the supplied MonkeyDrive Lite archive. These setup instructions were checked against the source and project documentation; hardware operation has not been tested as part of this repository preparation.
