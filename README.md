@@ -2,17 +2,8 @@
 
 **MonkeyDrive: An open-source microdrive system for neuroscience experiments**
 
-This repository contains the MonkeyDrive software and firmware. For the paper,
-hardware designs, assembly instructions, and other materials, see
-[Project resources](#project-resources) below.
-
-MonkeyDrive controls motorized microdrives for positioning electrodes and neural
-probes during neuroscience experiments. Its desktop interface supports up to six
-drives, with tools for viewing MRI anatomy and planning probe trajectories.
-
-You can move drives to a target, advance them in small steps, or run a sequence of
-movements. MRI viewing and trajectory planning are available without connecting
-hardware.
+This repository contains the MonkeyDrive software and firmware. MonkeyDrive controls motorized microdrives for positioning electrodes and neural probes during neuroscience experiments. Its desktop interface supports up to six drives, with tools for viewing MRI anatomy and planning probe trajectories. You can move drives to a target, advance them in small steps, or run a sequence of
+movements. 
 
 ## Project resources
 
