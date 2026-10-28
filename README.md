@@ -1,12 +1,23 @@
 # MonkeyDrive
 
-MonkeyDrive controls motorized microdrives for positioning electrodes and neural
-probes during neuroscience experiments. Its desktop interface supports up to six
-drives, with tools for viewing MRI anatomy and planning probe trajectories.
+**MonkeyDrive: An open-source microdrive system for neuroscience experiments**
 
-You can move drives to a target, advance them in small steps, or run a sequence of
-movements. MRI viewing and trajectory planning are available without connecting
-hardware.
+This repository contains the MonkeyDrive software and firmware. The MonkeyDrive system controls motorized microdrives for positioning neural probes during neuroscience experiments. Its desktop interface supports up to six drives, with tools for movement programs, MRI-based trajectory planning, and SpikeGLX integration.
+
+## Project resources
+
+- [Project website](https://jazlab.github.io/monkeydrive/): overview of the MonkeyDrive system and project highlights.
+- **Paper**: write-up on the system design and validation.
+- [Paper reproducibility](https://github.com/jazlab/monkeydrive_paper): data and code to reproduce the figures in the paper.
+- [MonkeyDrive chatbot](https://notebook.google.com/notebook/b31beb9a-0dcf-4763-a446-20673b686bbd/preview): ask questions about building and using MonkeyDrive. Google sign-in required.
+- [Documentation](https://docs.google.com/document/d/1CwdIq8lv9Gtcey1GMihnH131U_tzeRZlZ0cmyOJbvFY/edit?tab=t.0): user manuals, hardware files, assembly instructions, bill of materials, and quality testing.
+
+## Choose a codebase
+
+| Codebase | Location | Use it for |
+| --- | --- | --- |
+| **MonkeyDrive (primary)** | [`software/`](software/) and [`firmware/`](firmware/) | The full application, including movement programs, MRI/trajectory tools, and SpikeGLX integration. Follow the instructions below. |
+| **MonkeyDrive Lite** | [`lite/`](lite/) | Use for basic motor control and position tracking, without movement programs, MRI/trajectory tools, and SpikeGLX integration. Follow the [Lite setup guide](lite/README.md) and use its matching firmware. |
 
 ## What you need
 
@@ -23,12 +34,11 @@ MRI data is optional for motor control and is not included in the repository.
 ## Install and launch
 
 Clone the repository, then run the commands for your operating system from the
-repository folder. Access to this private repository requires an authorized
-GitHub account.
+repository folder.
 
 ```sh
-git clone https://github.com/jazlab/MonkeyDrive.git
-cd MonkeyDrive
+git clone https://github.com/jazlab/monkeydrive.git
+cd monkeydrive
 ```
 
 ### Windows — PowerShell
@@ -172,3 +182,9 @@ are in [`software/monkeydrive/`](software/monkeydrive/).
 
 For the code layout, control flow, and test commands, see the
 [developer guide](docs/development.md).
+
+## License
+
+The [MIT License](LICENSE) covers the MonkeyDrive project code in this repository,
+including the primary GUI and firmware, MonkeyDrive Lite, and website source.
+Third-party dependencies and externally hosted assets retain their own licenses.

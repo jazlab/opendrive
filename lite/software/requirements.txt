@@ -1,0 +1,5 @@
+# MonkeyDrive GUI Dependencies
+
+# Serial communication
+pyserial>=3.5
+

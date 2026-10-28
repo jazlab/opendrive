@@ -1,0 +1,7 @@
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+software/monkeydrive_state.json
+software/monkeydrive_export_*.csv
+.DS_Store

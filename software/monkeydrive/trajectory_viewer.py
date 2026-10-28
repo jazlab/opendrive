@@ -827,7 +827,7 @@ class _TrajectoryView:
         y_axis = np.asarray([0.0, 1.0, 0.0])
         z_axis = np.asarray([0.0, 0.0, 1.0])
 
-        # Sign choices follow the requested screen convention:
+        # Rotation signs follow this screen convention:
         # +AP rotates inline clockwise, +ML rotates inline 90 counterclockwise,
         # and +twist rotates the perpendicular/axial view clockwise.
         r_ap = AnatomySliceRenderer.rotation_matrix(tuple(x_axis), self._trajectory.ap_rotation)
