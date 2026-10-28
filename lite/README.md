@@ -1,6 +1,6 @@
 # MonkeyDrive Lite
 
-A minimal MonkeyDrive GUI and matching console firmware for controlling up to six microdrives. Use Lite for basic motor control, position tracking, notes, and CSV export. It does not include the primary codebase's MRI visualization or SpikeGLX integrations.
+A minimal MonkeyDrive GUI and matching console firmware for controlling up to six microdrives. Use Lite for basic motor control, position tracking, notes, and CSV export. It does not include the primary codebase's MRI visualization, SpikeGLX integrations, and other advanced features.
 
 The primary MonkeyDrive codebase remains the recommended starting point for the full system. Lite is a separate, self-contained alternative; use its GUI with the firmware in this directory.
 
