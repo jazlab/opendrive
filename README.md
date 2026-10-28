@@ -175,7 +175,7 @@ On connection, the GUI checks the controller's firmware version and verifies
 that it matches the full application. If it detects Lite, an incompatible
 version, or older firmware that cannot identify itself, it shows **Firmware
 Update Required** and prevents movement. Upload the matching sketch from this
-checkout and reconnect. This check requires updating previously installed firmware.
+checkout and reconnect.
 
 The firmware requires a valid heartbeat before accepting movement commands.
 After more than one second without one, it stops motion before issuing further
