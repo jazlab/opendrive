@@ -6,6 +6,14 @@ from typing import Optional
 class Config:
     """Global configuration parameters for the MonkeyDrive system."""
 
+    # Firmware compatibility contract; keep in sync with the matching sketch.
+    FIRMWARE_PRODUCT: str = "MonkeyDrive"
+    FIRMWARE_VARIANT: str = "lite"
+    FIRMWARE_VERSION: str = "1.0.0"
+    FIRMWARE_CHECK_TIMEOUT: float = 2.0
+    FIRMWARE_QUERY_INTERVAL: float = 0.25
+    FIRMWARE_SKETCH: str = "lite/firmware/monkeydrive_firmware/monkeydrive_firmware.ino"
+
     # Serial communication
     BAUD_RATE: int = 115200
     SERIAL_TIMEOUT: float = 0.1
@@ -122,6 +130,11 @@ class SerialProtocol:
     def cmd_pause_all() -> str:
         """Create PAUSE_ALL command to stop all motors."""
         return SerialProtocol.create_command("PAUSE_ALL")
+
+    @staticmethod
+    def cmd_firmware_info() -> str:
+        """Request the firmware product, variant, and compatibility version."""
+        return SerialProtocol.create_command("GET_FIRMWARE")
 
     @staticmethod
     def cmd_heartbeat() -> str:

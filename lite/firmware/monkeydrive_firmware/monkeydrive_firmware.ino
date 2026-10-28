@@ -14,6 +14,10 @@
 // =============================================================================
 
 namespace Config {
+    // Match the GUI compatibility constants; bump when this contract changes.
+    constexpr const char* FIRMWARE_PRODUCT = "MonkeyDrive";
+    constexpr const char* FIRMWARE_VARIANT = "lite";
+    constexpr const char* FIRMWARE_VERSION = "1.0.0";
     constexpr unsigned long SERIAL_BAUD = 115200;
     constexpr size_t SERIAL_BUFFER_SIZE = 128;
     
@@ -397,6 +401,14 @@ void processCommand(const char* cmd) {
 
     // Stop expired movement before even a late heartbeat renews the lease.
     checkHeartbeat();
+
+    if (strcmp(token, "GET_FIRMWARE") == 0) {
+        char response[80];
+        snprintf(response, sizeof(response), "FIRMWARE,%s,%s,%s",
+                 Config::FIRMWARE_PRODUCT, Config::FIRMWARE_VARIANT, Config::FIRMWARE_VERSION);
+        sendResponse(response);
+        return;
+    }
 
     if (strcmp(token, "HEARTBEAT") == 0) {
         lastHeartbeatReceived = millis();

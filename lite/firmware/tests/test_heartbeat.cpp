@@ -146,8 +146,23 @@ void timeoutBoundaryAndClockWrap() {
     require(!anyMotorRunning(), "Wraparound must not bypass the watchdog");
 }
 
+void firmwareIdentityDoesNotAuthorizeMovement() {
+    resetTest();
+    command("GET_FIRMWARE");
+    require(Serial.output.find(packet("FIRMWARE,MonkeyDrive,lite,1.0.0")) != std::string::npos,
+            "Firmware must return its exact identity with a valid checksum");
+    require(!heartbeatIsFresh() && !anyMotorRunning(), "Identity query must not enable motion");
+    command("RUN,1,0.02,10,5");
+    require(!anyMotorRunning(), "Identity query cannot substitute for a heartbeat");
+    startMoving();
+    testMillis = 1001;
+    command("GET_FIRMWARE");
+    require(!anyMotorRunning() && !heartbeatIsFresh(), "Identity query must enforce expiry");
+}
+
 int main() {
     try {
+        firmwareIdentityDoesNotAuthorizeMovement();
         startupRequiresHeartbeat();
         expiredLeaseStopsBeforeNextStep();
         repeatedTimeoutStillStopsMotors();
@@ -155,7 +170,7 @@ int main() {
         serialBatchCannotBypassExpiry();
         invalidHeartbeatDoesNotRenew();
         timeoutBoundaryAndClockWrap();
-        std::cout << "7 firmware heartbeat scenarios passed\n";
+        std::cout << "8 firmware heartbeat scenarios passed\n";
         return 0;
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';

@@ -49,4 +49,4 @@ class FirmwareTests(unittest.TestCase):
             self.assertEqual(build.returncode, 0, build.stdout + build.stderr)
             result = subprocess.run([str(binary)], capture_output=True, text=True, timeout=10)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            self.assertIn('7 firmware heartbeat scenarios passed', result.stdout)
+            self.assertIn('8 firmware heartbeat scenarios passed', result.stdout)

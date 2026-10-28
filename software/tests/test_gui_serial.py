@@ -886,6 +886,22 @@ class GuiSerialTests(unittest.TestCase):
                 app.root.update()
             send.assert_not_called()
 
+    def test_firmware_warning_identifies_update_and_correct_sketch(self):
+        for reply in [None, (Config.FIRMWARE_PRODUCT, 'lite', Config.FIRMWARE_VERSION)]:
+            with self.subTest(reply=reply), patch.object(FakePort, 'firmware_reply', reply), \
+                    patch.object(Config, 'FIRMWARE_CHECK_TIMEOUT', .12), \
+                    patch('monkeydrive_gui.messagebox.showwarning') as warning:
+                self.app._on_connect()
+                self.pump_until(lambda: warning.called)
+                self.pump_until(lambda: not self.app.serial_manager.is_busy)
+                title, message = warning.call_args.args
+                self.assertEqual(title, 'Firmware Update Required')
+                self.assertIn(Config.FIRMWARE_SKETCH, message)
+                self.assertIn('Movement is disabled', message)
+                self.assertFalse(self.app.serial_manager.is_connected)
+                self.assertEqual(self.app.view.connect_btn.cget('text'), 'Connect')
+                self.assertEqual(warning.call_count, 1)
+
     def test_positions_and_disconnect_update_gui(self):
         self.app._on_connect()
         self.pump_until(lambda: self.app.view.connect_btn.cget('text') == 'Disconnect')

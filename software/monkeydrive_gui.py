@@ -948,6 +948,9 @@ class MonkeyDriveApp:
     def _show_connection_lost_dialog(self):
         """Show connection lost dialog on main thread."""
         self.view.connect_btn.config(text="Connect", state="normal")
+        if self._serial_manager.failure_kind == "firmware":
+            messagebox.showwarning("Firmware Update Required", self._serial_manager.failure_reason)
+            return
         messagebox.showwarning(
             "Connection Lost",
             "The connection was stopped and a stop command was attempted. "

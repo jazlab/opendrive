@@ -30,6 +30,12 @@ On Windows Command Prompt, replace the activation command with `.venv\Scripts\ac
 
 The firmware targets the documented MonkeyDrive console wiring and motor mechanics. It uses Arduino/Teensy core facilities and requires no additional Arduino library in this sketch.
 
+On connection, Lite verifies the firmware's version and Lite variant before
+enabling movement. Full-app firmware, incompatible versions, and older firmware
+that cannot report a version trigger **Firmware Update Required**, with the
+correct sketch path. Upload this directory's matching firmware and reconnect;
+previously installed firmware needs this update to pass the check.
+
 ## Basic operation
 
 1. With console power disconnected, connect the drives. Connect USB to the computer, then power the assembled console as described in the manual.
