@@ -43,6 +43,27 @@ Read the [MonkeyDrive documentation](https://docs.google.com/document/d/1CwdIq8l
 
 ## Files and license
 
-- `software/monkeydrive_gui.py`: Python/Tkinter GUI; `pyserial` is its external Python dependency.
+- `software/monkeydrive_gui.py`: Python/Tkinter GUI; `pyserial` is its external Python dependency. Keep the accompanying Python files in the same folder.
+- `software/serial_manager.py`: background serial worker, bounded command queue, connection lifecycle, and heartbeat monitoring. Device I/O never runs on the GUI thread; reconnect waits for the previous worker to close its port.
+- `software/control_protocol.py`: configuration constants and serial packet formatting.
 - `firmware/monkeydrive_firmware/monkeydrive_firmware.ino`: matching Teensy 4.0 firmware.
 - [Root MIT License](../LICENSE): covers the Lite GUI and firmware.
+
+## Development checks
+
+From the repository root, with Lite's Python dependencies installed:
+
+```sh
+python -m unittest discover -s lite/tests -v
+```
+
+The tests use simulated serial ports and temporary GUI windows, without connecting
+to hardware or reading/writing saved application state. Firmware heartbeat tests
+compile the actual Lite sketch against simulated Arduino I/O and require GCC,
+Clang, or MSVC; they are skipped if no desktop C++ compiler is available.
+
+Firmware requires a valid heartbeat before accepting movement and checks its
+expiry before every stepping pass. After a timeout, a fresh heartbeat permits a
+new explicit Run command; it never resumes the interrupted movement by itself.
+The GUI stops renewing heartbeats if its event loop stalls, and reconnecting
+starts a new session rather than restarting old communication threads.
