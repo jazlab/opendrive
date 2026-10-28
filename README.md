@@ -34,8 +34,7 @@ MRI data is optional for motor control and is not included in the repository.
 ## Install and launch
 
 Clone the repository, then run the commands for your operating system from the
-repository folder. Access to this private repository requires an authorized
-GitHub account.
+repository folder.
 
 ```sh
 git clone https://github.com/jazlab/MonkeyDrive.git

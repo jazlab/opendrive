@@ -2,7 +2,7 @@
 
 Start the application with `software/monkeydrive_gui.py`. It creates one Tk root
 and connects the application, console view, keyboard controller, motion
-controller, and serial worker. The normal source launch command has not changed.
+controller, and serial worker.
 
 ## Where to make a change
 

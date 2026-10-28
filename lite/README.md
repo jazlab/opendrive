@@ -36,7 +36,7 @@ The firmware targets the documented MonkeyDrive console wiring and motor mechani
 2. Launch the GUI, choose the Teensy port, and click **Connect**. Typical names are `COMx` on Windows and `/dev/cu.usbmodem…` on macOS. Reopening the port menu refreshes it.
 3. Use **+ / −** to show the connected motor rows (up to six). Row numbers correspond to the console's numbered motor channels.
 4. Check the carriage ruler. Double-click **Absolute**, enter its current position in millimeters, and press Enter. Confirm this value before every session; the system has no position encoder.
-5. Select a motor's checkbox, enter **Speed** in mm/s and **Target** in absolute mm, then click **Run**. The supplied limits are 0–50 mm and 0.001–0.2 mm/s. Confirm the intended direction and travel with a short bench movement first.
+5. Select a motor's checkbox, enter **Speed** in mm/s and **Target** in absolute mm, then click **Run**. The default limits are 0–50 mm and 0.001–0.2 mm/s. Confirm the intended direction and travel with a short bench movement first.
 6. **Pause** stops selected running motors. **Zero** sets selected motors' relative-position reference; it does not move the drive or change the absolute position. **Export** pauses movement and saves the current table to CSV. Notes and state are also saved automatically.
 
 Read the [MonkeyDrive documentation](https://docs.google.com/document/d/1CwdIq8lv9Gtcey1GMihnH131U_tzeRZlZ0cmyOJbvFY/edit), especially the GUI Manual, Console Manual, and safety instructions. The software and firmware provide heartbeat checks and limits, but do not measure ground-truth position. Do not connect/disconnect drives while powered, let a drive hit a travel stop, or leave a running system unattended. Disconnect console power to stop movement in an emergency. Test the complete system on the bench before experimental use.
@@ -46,5 +46,3 @@ Read the [MonkeyDrive documentation](https://docs.google.com/document/d/1CwdIq8l
 - `software/monkeydrive_gui.py`: Python/Tkinter GUI; `pyserial` is its external Python dependency.
 - `firmware/monkeydrive_firmware/monkeydrive_firmware.ino`: matching Teensy 4.0 firmware.
 - [Root MIT License](../LICENSE): covers the Lite GUI and firmware.
-
-The source files are preserved from the supplied MonkeyDrive Lite archive. These setup instructions were checked against the source and project documentation; hardware operation has not been tested as part of this repository preparation.
