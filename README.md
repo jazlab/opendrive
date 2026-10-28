@@ -1,5 +1,7 @@
 # MonkeyDrive
 
+**MonkeyDrive: An open-source microdrive system for neuroscience experiments**
+
 MonkeyDrive controls motorized microdrives for positioning electrodes and neural
 probes during neuroscience experiments. Its desktop interface supports up to six
 drives, with tools for viewing MRI anatomy and planning probe trajectories.
@@ -7,6 +9,22 @@ drives, with tools for viewing MRI anatomy and planning probe trajectories.
 You can move drives to a target, advance them in small steps, or run a sequence of
 movements. MRI viewing and trajectory planning are available without connecting
 hardware.
+
+## Choose a codebase
+
+| Codebase | Location | Use it for |
+| --- | --- | --- |
+| **MonkeyDrive (primary)** | [`software/`](software/) and [`firmware/`](firmware/) | The full application, including movement programs, MRI/trajectory tools, and SpikeGLX integration. Follow the instructions below. |
+| **MonkeyDrive Lite** | [`lite/`](lite/) | Basic motor control, position tracking, notes, and export, without MRI or SpikeGLX integration. Follow the [Lite setup guide](lite/README.md) and use its matching firmware. |
+
+The two codebases are separate alternatives. The primary application remains at
+its existing paths; Lite includes its own GUI, dependencies, and firmware.
+
+## Project resources
+
+- [Paper code and data](https://github.com/jazlab/monkeydrive_paper): reproduce Figures 3 and 4 (private during release preparation).
+- [Project documentation](https://docs.google.com/document/d/1CwdIq8lv9Gtcey1GMihnH131U_tzeRZlZ0cmyOJbvFY/edit): hardware, assembly, and user manuals.
+- [Website source](site/index.html) and [preview/publishing instructions](docs/website.md). The planned website is <https://jazlab.github.io/MonkeyDrive/>; publishing is disabled during release preparation.
 
 ## What you need
 
@@ -172,3 +190,10 @@ are in [`software/monkeydrive/`](software/monkeydrive/).
 
 For the code layout, control flow, and test commands, see the
 [developer guide](docs/development.md).
+
+## License
+
+The [MIT License](LICENSE) covers the MonkeyDrive project code in this repository,
+including the primary GUI and firmware, MonkeyDrive Lite, and website source.
+Lite also retains its supplied copy of the same license. Third-party dependencies
+and externally hosted assets retain their own licenses.
