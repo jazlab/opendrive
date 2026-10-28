@@ -7,7 +7,7 @@ This repository contains the MonkeyDrive software and firmware. The MonkeyDrive 
 ## Project resources
 
 - [Project website](https://jazlab.github.io/MonkeyDrive/): overview of the MonkeyDrive system and project highlights.
-- **Paper** (link forthcoming): write-up on the system design and validation.
+- **Paper**: write-up on the system design and validation.
 - [Paper reproducibility](https://github.com/jazlab/monkeydrive_paper): data and code to reproduce the figures in the paper.
 - [MonkeyDrive chatbot](https://notebook.google.com/notebook/b31beb9a-0dcf-4763-a446-20673b686bbd/preview): ask questions about building and using MonkeyDrive. Google sign-in required.
 - [Documentation](https://docs.google.com/document/d/1CwdIq8lv9Gtcey1GMihnH131U_tzeRZlZ0cmyOJbvFY/edit?tab=t.0): user manuals, hardware files, assembly instructions, bill of materials, and quality control testing.
