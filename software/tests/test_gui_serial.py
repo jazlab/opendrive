@@ -887,7 +887,7 @@ class GuiSerialTests(unittest.TestCase):
             send.assert_not_called()
 
     def test_firmware_warning_identifies_update_and_correct_sketch(self):
-        for reply in [None, (Config.FIRMWARE_PRODUCT, 'lite', Config.FIRMWARE_VERSION)]:
+        for reply in [None, (Config.FIRMWARE_PRODUCT, 'unsupported-variant', Config.FIRMWARE_VERSION)]:
             with self.subTest(reply=reply), patch.object(FakePort, 'firmware_reply', reply), \
                     patch.object(Config, 'FIRMWARE_CHECK_TIMEOUT', .12), \
                     patch('monkeydrive_gui.messagebox.showwarning') as warning:
