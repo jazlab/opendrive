@@ -168,7 +168,7 @@ class SerialReliabilityTests(unittest.TestCase):
         self.assertFalse(any(x.startswith(('RUN', 'TARGET', 'CONFIG')) for x in port.writes))
 
     def test_incompatible_firmware_never_enables_motion(self):
-        other = 'lite' if Config.FIRMWARE_VARIANT == 'full' else 'full'
+        other = 'unsupported-variant'
         for reply in [(Config.FIRMWARE_PRODUCT, other, Config.FIRMWARE_VERSION),
                       (Config.FIRMWARE_PRODUCT, Config.FIRMWARE_VARIANT, '0.9.0'),
                       ('OtherDevice', Config.FIRMWARE_VARIANT, Config.FIRMWARE_VERSION),

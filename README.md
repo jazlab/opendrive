@@ -12,13 +12,6 @@ This repository contains the MonkeyDrive software and firmware. The MonkeyDrive 
 - [MonkeyDrive chatbot](https://notebook.google.com/notebook/b31beb9a-0dcf-4763-a446-20673b686bbd/preview): ask questions about building and using MonkeyDrive. Google sign-in required.
 - [Documentation](https://docs.google.com/document/d/1CwdIq8lv9Gtcey1GMihnH131U_tzeRZlZ0cmyOJbvFY/edit?tab=t.0): user manuals, hardware files, assembly instructions, bill of materials, and quality testing.
 
-## Choose a codebase
-
-| Codebase | Location | Use it for |
-| --- | --- | --- |
-| **MonkeyDrive (primary)** | [`software/`](software/) and [`firmware/`](firmware/) | The full application, including movement programs, MRI/trajectory tools, and SpikeGLX integration. Follow the instructions below. |
-| **MonkeyDrive Lite** | [`lite/`](lite/) | Use for basic motor control and position tracking, without movement programs, MRI/trajectory tools, and SpikeGLX integration. Follow the [Lite setup guide](lite/README.md) and use its matching firmware. |
-
 ## What you need
 
 - **For the desktop app:** Windows or macOS, Python 3.10 or newer with Tkinter,
@@ -172,7 +165,7 @@ port, and upload it. Confirm the pin assignments and motor configuration match
 your control unit before use.
 
 On connection, the GUI checks the controller's firmware version and verifies
-that it matches the full application. If it detects Lite, an incompatible
+that it matches the application. If it detects an incompatible variant or
 version, or older firmware that cannot identify itself, it shows **Firmware
 Update Required** and prevents movement. Upload the matching sketch from this
 checkout and reconnect.
@@ -192,5 +185,5 @@ For the code layout, control flow, and test commands, see the
 ## License
 
 The [MIT License](LICENSE) covers the MonkeyDrive project code in this repository,
-including the primary GUI and firmware, MonkeyDrive Lite, and website source.
+including the GUI, firmware, and website source.
 Third-party dependencies and externally hosted assets retain their own licenses.

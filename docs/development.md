@@ -67,9 +67,9 @@ when changing keyboard handling.
 ### Firmware compatibility
 
 Before a connection becomes usable, the worker sends `GET_FIRMWARE` and requires
-a checksummed `FIRMWARE,MonkeyDrive,full,1.0.0` response (Lite uses `lite` instead
-of `full`), plus a heartbeat acknowledgement. Queries are retried for up to two
-seconds. A mismatch or missing version closes the connection and queues a
+a checksummed `FIRMWARE,MonkeyDrive,full,1.0.0` response, plus a heartbeat
+acknowledgement. Queries are retried for up to two seconds. A mismatch or missing
+version closes the connection and queues a
 firmware warning for Tk; RUN, TARGET, and CONFIG cannot be queued during this check.
 Reconnect always repeats verification. The identity query does not renew the
 controller's heartbeat or authorize motion.
@@ -77,8 +77,7 @@ controller's heartbeat or authorize motion.
 Keep `FIRMWARE_PRODUCT`, `FIRMWARE_VARIANT`, and `FIRMWARE_VERSION` in the GUI
 configuration and matching sketch synchronized. The version is an exact
 compatibility contract: bump it when firmware changes require a different GUI
-or invalidate the behavior expected by an existing GUI. Full and Lite remain
-self-contained and have separate identities.
+or invalidate the behavior expected by an existing GUI.
 
 ### Ownership
 
