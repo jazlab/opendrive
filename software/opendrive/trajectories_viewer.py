@@ -13,12 +13,17 @@ from .viewer_theme import configure_viewer, style_viewer, viewer_heading
 
 
 class TrajectoriesViewer(tk.Toplevel):
+    _PROBE_MAP_FIELDS = ('probe_map_enabled', 'probe_map_probe', 'probe_map_min_mv',
+                         'probe_map_max_mv', 'probe_map_update_ms', 'probe_map_smooth', 'probe_map_smoothing_um',
+                         'probe_width_px')
+
     def __init__(self, parent, motor_states, anatomy_path, orientation_actual='', orientation_scanner='',
                  explorer_state=None, revisions=None, on_save=None, on_explorer_change=None, on_assign=None):
         super().__init__(parent)
         configure_viewer(self)
         self._states = {state.motor_id: MotorState.from_dict(state.to_dict()) for state in motor_states}
         self._revisions = {int(key): int(value) for key, value in (revisions or {}).items()}
+        self._pending_probe_map_settings = {}
         self._on_save = on_save
         self._on_explorer_change = on_explorer_change
         self._on_assign = on_assign
@@ -175,6 +180,17 @@ class TrajectoriesViewer(tk.Toplevel):
             return
         if revision is not None and revision < self._revisions.get(state.motor_id, 0):
             return
+        state = MotorState.from_dict(state.to_dict())
+        pending = self._pending_probe_map_settings.get(state.motor_id)
+        if pending is not None:
+            incoming = tuple(getattr(state.trajectory, key) for key in self._PROBE_MAP_FIELDS)
+            if incoming == pending or (revision is not None and revision > self._revisions.get(state.motor_id, 0)):
+                self._pending_probe_map_settings.pop(state.motor_id, None)
+            else:
+                # A motor update can have been sent before the console received
+                # our settings save. Keep the edit until its acknowledgement.
+                for key, value in zip(self._PROBE_MAP_FIELDS, pending):
+                    setattr(state.trajectory, key, value)
         previous = self._states[state.motor_id]
         changed = previous.trajectory.to_dict() != state.trajectory.to_dict()
         self._states[state.motor_id] = MotorState.from_dict(state.to_dict())
@@ -194,8 +210,10 @@ class TrajectoriesViewer(tk.Toplevel):
             if state.motor_id in self._states:
                 revision = (revisions or {}).get(str(state.motor_id))
                 self.update_motor_state(state, revision)
-        self._states = {state.motor_id: MotorState.from_dict(state.to_dict()) for state in states}
-        self._revisions.update({int(key): int(value) for key, value in (revisions or {}).items()})
+        self._states = {state.motor_id: MotorState.from_dict(self._states.get(state.motor_id, state).to_dict())
+                        for state in states}
+        self._revisions.update({int(key): max(int(value), self._revisions.get(int(key), 0))
+                                for key, value in (revisions or {}).items()})
         if changed:
             self._sync_drive_pages()
             if 'summary' in self._panels:
@@ -212,6 +230,10 @@ class TrajectoriesViewer(tk.Toplevel):
             self.select_tab(motor_id)
 
     def _save_drive(self, motor_id, trajectory):
+        previous = self._states[motor_id].trajectory
+        settings = tuple(getattr(trajectory, key) for key in self._PROBE_MAP_FIELDS)
+        if settings != tuple(getattr(previous, key) for key in self._PROBE_MAP_FIELDS):
+            self._pending_probe_map_settings[motor_id] = settings
         self._states[motor_id].trajectory = TrajectoryState.from_dict(trajectory.to_dict())
         if 'summary' in self._panels:
             self._panels['summary'].update_motor_state(self._states[motor_id])

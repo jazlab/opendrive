@@ -9,7 +9,7 @@ int testEnable = HIGH;
 unsigned int testStepPulses[7] = {};
 TestSerial Serial;
 
-#include "../monkeydrive_firmware/monkeydrive_firmware.ino"
+#include "../opendrive_firmware/opendrive_firmware.ino"
 
 void require(bool condition, const char* message) {
     if (!condition) throw std::runtime_error(message);
@@ -153,7 +153,7 @@ void timeoutBoundaryAndClockWrap() {
 void firmwareIdentityDoesNotAuthorizeMovement() {
     resetTest();
     command("GET_FIRMWARE");
-    require(Serial.output.find(packet("FIRMWARE,MonkeyDrive,full,1.0.0")) != std::string::npos,
+    require(Serial.output.find(packet("FIRMWARE,OpenDrive,full,1.0.0")) != std::string::npos,
             "Firmware must return its exact identity with a valid checksum");
     require(!heartbeatIsFresh() && !anyMotorRunning(), "Identity query must not enable motion");
     command("RUN,1,0.02,10,5");

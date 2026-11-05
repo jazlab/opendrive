@@ -7,9 +7,10 @@ import tempfile
 
 from .config import Config
 from .models import MotorState, TrajectoryState
+from .probe_view_settings import probe_view_settings
 
 
-FORMAT = 'monkeydrive-config'
+FORMAT = 'opendrive-config'
 VERSION = 1
 
 
@@ -72,6 +73,8 @@ def validate_workspace(data):
     if not isinstance(recent, list) or not all(isinstance(path, str) for path in recent):
         raise ValueError('Recent programs must be a list of paths.')
     result['recent_programs'] = recent[:10]
+    if 'probe_view_settings' in data:
+        result['probe_view_settings'] = probe_view_settings(data['probe_view_settings'], strict=True)
 
     motors = data.get('motor_states')
     if not isinstance(motors, list) or not 1 <= len(motors) <= Config.MAX_MOTORS:
@@ -98,6 +101,10 @@ def validate_workspace(data):
                     number(value, f'Drive {index} trajectory {key}')
             if not .5 <= state.trajectory.zoom <= 10:
                 raise ValueError('Trajectory zoom must be between 0.5 and 10.')
+            if not 10 <= state.trajectory.probe_map_smoothing_um <= 5000:
+                raise ValueError('Activity smoothing width must be between 10 and 5000 µm.')
+            if not 6 <= state.trajectory.probe_width_px <= 256:
+                raise ValueError('Probe width must be between 6 and 256 pixels.')
             for step in state.instructions:
                 step.target = number(step.target, 'Program target', 0, 50)
                 step.speed = number(step.speed, 'Program speed', .000001)
@@ -130,8 +137,8 @@ def validate_workspace(data):
 def read_config(path):
     with open(path, encoding='utf-8-sig') as stream:
         document = json.load(stream)
-    if not isinstance(document, dict) or document.get('format') != FORMAT:
-        raise ValueError('This is not a MonkeyDrive configuration file.')
+    if not isinstance(document, dict) or document.get('format') not in (FORMAT, 'monkeydrive-config'):
+        raise ValueError('This is not a OpenDrive configuration file.')
     if type(document.get('version')) is not int or document['version'] != VERSION:
         raise ValueError('This configuration version is not supported.')
     return validate_workspace(document.get('workspace'))

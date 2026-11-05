@@ -6,11 +6,53 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from monkeydrive.configuration import atomic_write_json, read_config, validate_workspace, write_config
-from monkeydrive.models import InstructionStep, MotorState, TrajectoryState
+from opendrive.configuration import atomic_write_json, read_config, validate_workspace, write_config
+from opendrive.models import InstructionStep, MotorState, TrajectoryState
 
 
 class ConfigurationTests(unittest.TestCase):
+    def test_new_configs_use_opendrive_and_previous_configs_still_load(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'session.json'
+            write_config(path, self.workspace())
+            document = json.loads(path.read_text())
+            self.assertEqual(document['format'], 'opendrive-config')
+            document['format'] = 'monkeydrive-config'
+            path.write_text(json.dumps(document))
+            self.assertEqual(read_config(path)['motor_states'], validate_workspace(self.workspace())['motor_states'])
+
+
+    def test_trajectory_smoothing_survives_configs_with_legacy_defaults(self):
+        workspace = self.workspace()
+        trajectory = workspace['motor_states'][0]['trajectory']
+        trajectory.update(probe_map_smooth=True, probe_map_smoothing_um=200, probe_width_px=40)
+        restored = validate_workspace(workspace)['motor_states'][0]['trajectory']
+        self.assertTrue(restored['probe_map_smooth'])
+        self.assertEqual(restored['probe_map_smoothing_um'], 200)
+        self.assertEqual(restored['probe_width_px'], 40)
+        del trajectory['probe_width_px']
+        del trajectory['probe_map_smooth']; del trajectory['probe_map_smoothing_um']
+        legacy = validate_workspace(workspace)['motor_states'][0]['trajectory']
+        self.assertFalse(legacy['probe_map_smooth'])
+        self.assertEqual(legacy['probe_map_smoothing_um'], 150)
+        self.assertEqual(legacy['probe_width_px'], 24)
+        trajectory['probe_map_smoothing_um'] = 0
+        with self.assertRaises(ValueError):
+            validate_workspace(workspace)
+
+    def test_probe_view_settings_survive_config_round_trip_and_reject_invalid_values(self):
+        workspace = self.workspace()
+        settings = dict(min_mv=0, max_mv=.2, update_ms=200, horizontal_pixels=20, vertical_pixels=6, spacing=0)
+        workspace['probe_view_settings'] = settings
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'session.json'
+            write_config(path, workspace)
+            self.assertEqual(read_config(path)['probe_view_settings'], settings)
+        for invalid in (dict(max_mv=0), dict(update_ms=0), dict(horizontal_pixels=0),
+                        dict(spacing=-1), dict(vertical_pixels=float('nan'))):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                validate_workspace({**workspace, 'probe_view_settings': {**settings, **invalid}})
+
     def workspace(self):
         motor = MotorState(1, absolute=7.125, relative=-.5, relative_zero_point=7.625,
                            target=12, speed=.02, notes='Probe A\nSecond line', is_selected=True,
@@ -58,7 +100,7 @@ class ConfigurationTests(unittest.TestCase):
     def test_unknown_version_or_unrelated_json_is_rejected(self):
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / 'bad.json'
-            for data in ([], {}, {'format': 'monkeydrive-config', 'version': 99, 'workspace': self.workspace()}):
+            for data in ([], {}, {'format': 'opendrive-config', 'version': 99, 'workspace': self.workspace()}):
                 path.write_text(json.dumps(data), encoding='utf-8')
                 with self.assertRaises(ValueError):
                     read_config(path)
@@ -67,7 +109,7 @@ class ConfigurationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / 'config.json'
             path.write_text('original', encoding='utf-8')
-            with patch('monkeydrive.configuration.os.replace', side_effect=OSError('disk unavailable')):
+            with patch('opendrive.configuration.os.replace', side_effect=OSError('disk unavailable')):
                 with self.assertRaises(OSError):
                     write_config(path, self.workspace())
             self.assertEqual(path.read_text(), 'original')
@@ -75,7 +117,7 @@ class ConfigurationTests(unittest.TestCase):
 
     def test_automatic_state_keeps_legacy_format(self):
         with tempfile.TemporaryDirectory() as folder:
-            path = Path(folder) / 'monkeydrive_state.json'
+            path = Path(folder) / 'opendrive_state.json'
             atomic_write_json(path, self.workspace())
             self.assertEqual(json.loads(path.read_text()), self.workspace())
 

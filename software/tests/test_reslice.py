@@ -2,8 +2,8 @@
 from pathlib import Path
 import unittest
 import numpy as np
-from monkeydrive.anatomy import AnatomyVolume, AnatomySliceRenderer
-from monkeydrive.reslice import ObliqueReslicer
+from opendrive.anatomy import AnatomyVolume, AnatomySliceRenderer
+from opendrive.reslice import ObliqueReslicer
 
 
 class ResliceTests(unittest.TestCase):

@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import importlib
+import math
 import os
 import sys
 import tempfile
+import threading
 import time
 from contextlib import contextmanager
 from ctypes import POINTER, byref, c_bool, c_double, c_int, c_short
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -110,10 +112,17 @@ def _stream_label(js: int, ip: int) -> str:
     return f"stream js={js}, ip={ip}"
 
 
+_sdk_command_lock = threading.RLock()
+
+
 @contextmanager
 def _spikeglx_command_lock():
-    """Serialize SDK command-server calls across MonkeyDrive windows/processes."""
-    yield
+    """Protect the native SDK's process-global connection table across threads.
+
+    Separate processes load separate SDK instances and need no shared lock.
+    """
+    with _sdk_command_lock:
+        yield
 
 
 class SpikeGLXLiveClient:
@@ -135,6 +144,7 @@ class SpikeGLXLiveClient:
         self._channel_shanks: list[int] = []
         self._last_geometry_refresh = 0.0
         self._debug_callback = None
+        self._last_extrema = ([], [])
 
     def set_debug_callback(self, callback):
         self._debug_callback = callback
@@ -149,9 +159,10 @@ class SpikeGLXLiveClient:
 
     def connect(self) -> SpikeGLXStreamInfo:
         """Connect to SpikeGLX and query the selected live stream."""
-        self._sglx = self._load_sdk()
-        self._handle = self._sglx.c_sglx_createHandle()
+        self._volts_per_i16.clear()
         with _spikeglx_command_lock():
+            self._sglx = self._load_sdk()
+            self._handle = self._sglx.c_sglx_createHandle()
             ok = self._sglx.c_sglx_connect(
                 self._handle,
                 self.config.host.encode("utf-8"),
@@ -243,7 +254,7 @@ class SpikeGLXLiveClient:
             source_path=self._source_path,
         )
 
-    def fetch_snapshot(self) -> SpikeGLXSnapshot:
+    def fetch_snapshot(self, *, start_sample=None, sample_count=None, stream_info=None) -> SpikeGLXSnapshot:
         """Fetch a small latest-data chunk and summarize it for the UI."""
         self._require_connected()
         sglx = self._sglx
@@ -251,7 +262,7 @@ class SpikeGLXLiveClient:
         config = self.config
 
         self._debug("fetch_snapshot get_stream_info start")
-        info = self.get_stream_info()
+        info = stream_info or self.get_stream_info()
         self._debug(
             f"fetch_snapshot get_stream_info done sample_count={info.sample_count} "
             f"ap_chans={info.ap_channel_count} chans={info.channel_count}"
@@ -271,11 +282,12 @@ class SpikeGLXLiveClient:
 
         fetch_js = -2 if config.prefer_filtered and config.js == 2 else config.js
         data_source = "SpikeGLX filtered AP" if fetch_js == -2 else "raw AP"
-        fetch_count = max(1, int(config.samples_per_fetch))
-        start_sample = max(0, info.sample_count - fetch_count)
+        fetch_count = max(1, int(config.samples_per_fetch if sample_count is None else sample_count))
+        explicit_start = start_sample is not None
+        start_sample = max(0, info.sample_count - fetch_count) if start_sample is None else start_sample
 
         with _spikeglx_command_lock():
-            if fetch_js == -2:
+            if fetch_js == -2 or explicit_start:
                 self._debug(
                     f"fetch_snapshot fetch start js={fetch_js} ip={config.ip} "
                     f"start={start_sample} count={fetch_count} chans={channels_to_fetch}"
@@ -316,6 +328,7 @@ class SpikeGLXLiveClient:
                 self._debug(f"fetch_snapshot fetchLatest done head={head} n_data={n_data.value}")
 
         if head == 0:
+            self._last_extrema = ([], [])
             self._dropped_chunks += 1
             if fetch_js == -2:
                 raise SpikeGLXUnavailable(
@@ -358,6 +371,84 @@ class SpikeGLXLiveClient:
             channel_shanks=self._channel_shanks[:channels_to_fetch],
             data_source=data_source,
         )
+
+    def iter_heatmaps(self, stop_event, update_ms):
+        """Accumulate contiguous 100-ms blocks as online SpikeGLX Shank View does.
+
+        Matches SVShankViewTab's windowing and Heatmap::accumPkPk/normPkPk:
+        extrema across the whole window, then channel-specific input voltage.
+        Filtered samples come directly from SpikeGLX, with no second filter/CAR.
+        Separate viewers can have different window start times.
+        """
+        info = self.get_stream_info()
+        if not math.isfinite(info.sample_rate_hz) or info.sample_rate_hz <= 0:
+            raise SpikeGLXUnavailable('SpikeGLX did not report a valid sample rate.')
+        def prime_calibration(metadata):
+            channels = max(1, min(metadata.ap_channel_count or metadata.channel_count or 1, self.config.max_channels))
+            for channel in range(channels):
+                if stop_event.is_set():
+                    return
+                self._channel_i16_to_mv(channel)
+        # Calibration requires one server query per channel. Finish it before
+        # choosing a starting sample, so a busy server cannot age that window
+        # out of the filtered ring buffer during initial connection.
+        prime_calibration(info)
+        block_size = max(1, int(info.sample_rate_hz * .1))
+        required_blocks = max(1, int(float(update_ms) / 100))
+        fetch_js = -2 if self.config.prefer_filtered and self.config.js == 2 else self.config.js
+        # Query the acquisition clock using the documented non-negative stream
+        # ID. Older servers log an error even if a rejected -2 query is caught.
+        count_js = self._metadata_js()
+        cursor = None
+        previous_available = None
+        minima, maxima, blocks = [], [], 0
+        refreshed = time.monotonic()
+        while not stop_event.is_set():
+            now = time.monotonic()
+            if self.config.geometry_refresh_s > 0 and now - refreshed >= self.config.geometry_refresh_s:
+                info = self.get_stream_info()
+                refreshed = now
+            with _spikeglx_command_lock():
+                available = int(self._sglx.c_sglx_getStreamSampleCount(self._handle, count_js, self.config.ip))
+            if count_js != fetch_js:
+                available = max(0, available - block_size)
+            if previous_available is not None and available < previous_available:
+                # A new acquisition may use a different gain table or rate.
+                self._volts_per_i16.clear()
+                info = self.get_stream_info()
+                block_size = max(1, int(info.sample_rate_hz * .1))
+                prime_calibration(info)
+                cursor = None
+                previous_available = None
+                continue
+            previous_available = available
+            if cursor is None or available < cursor:
+                cursor = max(block_size, available // block_size * block_size)
+                minima, maxima, blocks = [], [], 0
+            if available < cursor + block_size:
+                stop_event.wait(.02)
+                continue
+            snapshot = self.fetch_snapshot(start_sample=cursor, sample_count=block_size,
+                                           stream_info=replace(info, sample_count=available))
+            if snapshot.fetched_samples != block_size or snapshot.latest_head_sample != cursor:
+                raise SpikeGLXUnavailable('SpikeGLX could not supply a contiguous heatmap window. Retry the probe map.')
+            low, high = self._last_extrema
+            if not blocks:
+                minima, maxima = list(low), list(high)
+            else:
+                if len(low) != len(minima):
+                    raise SpikeGLXUnavailable('SpikeGLX channel count changed. Retry the probe map.')
+                minima = [min(a, b) for a, b in zip(minima, low)]
+                maxima = [max(a, b) for a, b in zip(maxima, high)]
+            cursor += block_size
+            blocks += 1
+            if blocks >= required_blocks:
+                if stop_event.is_set():
+                    return
+                values = [(hi - lo) * self._channel_i16_to_mv(ch)
+                          for ch, (lo, hi) in enumerate(zip(minima, maxima))]
+                yield replace(snapshot, peak_to_peak_mv=values, fetched_samples=blocks * block_size)
+                minima, maxima, blocks = [], [], 0
 
     def _get_channel_geometry(self, probe_index: int) -> list[tuple[int, float, float]]:
         n_values = c_int()
@@ -414,6 +505,7 @@ class SpikeGLXLiveClient:
 
     def _peak_to_peak_mv(self, data, sample_count: int, channel_count: int) -> list[float]:
         if sample_count <= 0 or channel_count <= 0:
+            self._last_extrema = ([], [])
             return []
 
         if self.config.use_numpy:
@@ -422,13 +514,15 @@ class SpikeGLXLiveClient:
 
                 array = np.ctypeslib.as_array(data, shape=(sample_count * channel_count,))
                 shaped = array.reshape(sample_count, channel_count)
-                ranges = shaped.max(axis=0).astype(np.float64) - shaped.min(axis=0).astype(np.float64)
+                minima, maxima = shaped.min(axis=0), shaped.max(axis=0)
+                self._last_extrema = (minima.tolist(), maxima.tolist())
+                ranges = maxima.astype(np.float64) - minima.astype(np.float64)
                 multipliers = np.asarray(
                     [self._channel_i16_to_mv(channel) for channel in range(channel_count)],
                     dtype=np.float64,
                 )
                 return (ranges * multipliers).tolist()
-            except Exception:
+            except ImportError:
                 pass
 
         mins = [32767] * channel_count
@@ -443,6 +537,7 @@ class SpikeGLXLiveClient:
                 maxes[channel] = value
 
         values: list[float] = []
+        self._last_extrema = (mins, maxes)
         for channel in range(channel_count):
             values.append((maxes[channel] - mins[channel]) * self._channel_i16_to_mv(channel))
         return values
@@ -478,7 +573,10 @@ class SpikeGLXLiveClient:
                 self.config.ip,
                 channel,
             )
-        self._volts_per_i16[channel] = float(multiplier.value) if ok else 0.0
+        if not ok or not math.isfinite(multiplier.value) or multiplier.value <= 0:
+            raise SpikeGLXUnavailable(f'Could not read valid voltage calibration for channel {channel}. {self._error_message()}')
+        # The SDK factor already includes the channel gain. Do not divide twice.
+        self._volts_per_i16[channel] = float(multiplier.value)
         return self._volts_per_i16[channel] * 1000.0
 
     def _metadata_js(self) -> int:
@@ -524,7 +622,7 @@ class SpikeGLXLiveClient:
         raise SpikeGLXUnavailable(
             "SpikeGLX SDK Python wrapper was not found or could not load SglxApi.dll.\n\n"
             "Install the SpikeGLX CPP SDK and set SPIKEGLX_SDK_PYTHON to its Windows/Python folder, "
-            "or place sglx_pkg beside MonkeyDrive.\n\n"
+            "or place sglx_pkg beside OpenDrive.\n\n"
             f"Searched:\n{searched}{details}"
         )
 

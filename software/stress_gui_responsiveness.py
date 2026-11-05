@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Stress-test MonkeyDrive GUI responsiveness without commanding hardware.
+"""Stress-test OpenDrive GUI responsiveness without commanding hardware.
 
 This script opens the normal GUI, optionally opens trajectory viewers and the
 trajectory summary viewer, then simulates high-rate serial position updates.
@@ -17,7 +17,7 @@ import threading
 import time
 from unittest.mock import patch
 
-from monkeydrive_gui import MonkeyDriveApp
+from opendrive_gui import OpenDriveApp
 
 
 def percentile(values: list[float], pct: float) -> float:
@@ -34,8 +34,8 @@ class GuiStressTest:
     def __init__(self, args: argparse.Namespace):
         self.args = args
         # Suppress the constructor's initial save as well as subsequent saves.
-        with patch.object(MonkeyDriveApp, '_save_state', lambda _self: None):
-            self.app = MonkeyDriveApp()
+        with patch.object(OpenDriveApp, '_save_state', lambda _self: None):
+            self.app = OpenDriveApp()
         self.root = self.app.root
         self.stop_event = threading.Event()
         self.tick_gaps_ms: list[float] = []
@@ -50,7 +50,7 @@ class GuiStressTest:
         self.app._save_state = lambda: None
 
     def run(self) -> int:
-        self.root.title("MonkeyDrive Stress Test")
+        self.root.title("OpenDrive Stress Test")
         self.root.after(250, self._open_viewers)
         self.root.after(self.args.tick_ms, self._tick)
         self.root.after(int(self.args.duration * 1000), self._finish)

@@ -1,4 +1,4 @@
-"""Dialog windows used by the MonkeyDrive GUI."""
+"""Dialog windows used by the OpenDrive GUI."""
 
 from typing import Callable
 

@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import io
+import math
 import queue
 import threading
 import time
 from typing import Callable
 
 import tkinter as tk
-from tkinter import messagebox
+from tkinter import messagebox, ttk
 import numpy as np
 from PIL import Image, ImageTk
 
@@ -26,6 +27,8 @@ from .viewer_theme import configure_viewer, style_viewer, viewer_button, viewer_
 from .viewer_tasks import LatestWorker
 from .models import TrajectoryState
 from .probe_map_colors import color_from_lut, load_shank_lut
+from .probe_map_smoothing import SpatialActivitySmoother
+from .probe_overlay import ProbeOverlayRenderer, probe_body_points, contact_activity_image
 from .spikeglx_client import SpikeGLXConfig, SpikeGLXLiveClient, SpikeGLXUnavailable
 
 
@@ -93,10 +96,25 @@ class _TrajectoryView:
         self._probe_map_generation = 0
         self._probe_map_values_mv: list[float] = []
         self._probe_map_depths_mm: list[float] = []
+        self._probe_map_x_mm: list[float] = []
+        self._probe_map_shanks: list[int] = []
         self._probe_map_update_count = 0
         self._probe_map_lut = load_shank_lut()
+        self._probe_overlay_renderer = ProbeOverlayRenderer(self._probe_map_lut)
+        self._probe_smoothing_geometry = None
+        self._probe_smoother = None
+        self._probe_smoothed_key = None
+        self._probe_smoothed_profiles = []
         self._probe_map_channel_pitch_mm = 0.01
-        self._probe_map_items: dict[int, dict[int, int]] = {}
+        self._probe_map_items: dict[int, int] = {}
+        self._probe_map_image_refs = {}
+        self._probe_map_layout_keys = {}
+        self._probe_map_palette_key = None
+        self._probe_map_colors = ()
+        self._probe_map_worker_settings = None
+        self._probe_discovery_worker = None
+        self._probe_discovery_pending = False
+        self._available_probe_count = None
         self._probe_map_last_status_time = 0.0
         self._probe_map_draw_job = None
         self._zoom_render_job = None
@@ -110,9 +128,13 @@ class _TrajectoryView:
         self._offset_var = tk.StringVar(value=f"{self._trajectory.perpendicular_offset:g}")
         self._probe_map_enabled_var = tk.BooleanVar(value=self._trajectory.probe_map_enabled)
         self._probe_map_probe_var = tk.StringVar(value=f"{self._trajectory.probe_map_probe:g}")
+        self._probe_map_probe_label_var = tk.StringVar(value=f'imec{self._trajectory.probe_map_probe}')
         self._probe_map_min_var = tk.StringVar(value=f"{self._trajectory.probe_map_min_mv:g}")
         self._probe_map_max_var = tk.StringVar(value=f"{self._trajectory.probe_map_max_mv:g}")
         self._probe_map_update_ms_var = tk.StringVar(value=f"{self._trajectory.probe_map_update_ms:g}")
+        self._probe_map_smooth_var = tk.BooleanVar(value=self._trajectory.probe_map_smooth)
+        self._probe_map_smoothing_var = tk.StringVar(value=f'{self._trajectory.probe_map_smoothing_um:g}')
+        self._probe_width_var = tk.StringVar(value=str(self._trajectory.probe_width_px))
         self._probe_button: tk.Button | None = None
         self._target_button: tk.Button | None = None
         self._target_editing = False
@@ -129,9 +151,10 @@ class _TrajectoryView:
 
         self._build_ui()
         self._style_widget_tree()
-        self._probe_poll_job = self.after(100, self._poll_probe_map_events)
+        self._probe_poll_job = self.after(16, self._poll_probe_map_events)
         if not managed:
             self.after(100, self._load_anatomy)
+            self.after(150, self._refresh_available_probes)
         if self._active and self._trajectory.probe_map_enabled:
             self.after(250, self._restart_probe_map_worker)
 
@@ -148,6 +171,7 @@ class _TrajectoryView:
     def set_active(self, active):
         self._active = active
         if active:
+            self._refresh_available_probes()
             self.update_motor_position(self._motor_position)
             self._render_all()
             if self._trajectory.probe_map_enabled:
@@ -160,6 +184,8 @@ class _TrajectoryView:
 
     def destroy(self):
         """Stop live probe-map work before destroying this window."""
+        if self._probe_discovery_worker:
+            self._probe_discovery_worker.close()
         if getattr(self, '_probe_poll_job', None) is not None:
             self.after_cancel(self._probe_poll_job)
             self._probe_poll_job = None
@@ -233,16 +259,34 @@ class _TrajectoryView:
         probe_map_frame.pack_propagate(False)
         probe_map_frame.pack(side=tk.RIGHT, fill=tk.Y, padx=(8, 0))
         tk.Label(probe_map_frame, text="SpikeGLX Map").pack(anchor='w')
+        tk.Label(probe_map_frame, text='AP peak-to-peak (mV)\n1 mV = 1000 µV', justify='left').pack(anchor='w', pady=(4, 6))
         tk.Checkbutton(
             probe_map_frame,
             text="Show on probe",
             variable=self._probe_map_enabled_var,
             command=self._on_probe_map_settings_change,
         ).pack(anchor='w')
-        self._add_probe_map_field(probe_map_frame, "Probe:", self._probe_map_probe_var, restart=True)
+        tk.Label(probe_map_frame, text='Probe:', anchor='w').pack(fill=tk.X)
+        self._probe_map_combo = ttk.Combobox(probe_map_frame, textvariable=self._probe_map_probe_label_var,
+            values=(), state='readonly', width=12, postcommand=self._refresh_available_probes)
+        self._probe_map_combo.pack(fill=tk.X, pady=(0, 4))
+        self._probe_map_combo.bind('<<ComboboxSelected>>', self._select_probe_map_probe)
         self._add_probe_map_field(probe_map_frame, "Min mV:", self._probe_map_min_var, restart=False)
         self._add_probe_map_field(probe_map_frame, "Max mV:", self._probe_map_max_var, restart=False)
-        self._add_probe_map_field(probe_map_frame, "Update ms:", self._probe_map_update_ms_var, restart=True)
+        self._add_probe_map_field(probe_map_frame, "Update ms (100 ms steps):", self._probe_map_update_ms_var, restart=True)
+        width_row = tk.Frame(probe_map_frame)
+        width_row.pack(fill=tk.X, pady=2)
+        tk.Label(width_row, text='Probe width (pixels):', anchor='w').pack(fill=tk.X)
+        self._probe_width_spinbox = ttk.Spinbox(width_row, textvariable=self._probe_width_var,
+            from_=6, to=256, increment=1, width=9, command=self._on_probe_map_settings_change)
+        self._probe_width_spinbox.pack(fill=tk.X)
+        for event in ('<Return>', '<KP_Enter>', '<FocusOut>'):
+            self._probe_width_spinbox.bind(event, self._commit_probe_map_redraw_from_event)
+        tk.Checkbutton(probe_map_frame, text='Smooth activity', variable=self._probe_map_smooth_var,
+                       command=self._on_probe_map_settings_change).pack(anchor='w', pady=(6, 0))
+        self._add_probe_map_field(probe_map_frame, 'Smoothing distance (µm):', self._probe_map_smoothing_var, restart=False)
+        tk.Label(probe_map_frame, text='Larger values blend activity\nover a greater distance.',
+                 justify=tk.LEFT, anchor='w').pack(fill=tk.X, pady=(0, 4))
         viewer_button(
             probe_map_frame,
             text="Retry map",
@@ -375,6 +419,7 @@ class _TrajectoryView:
         )
         entry.bind('<Return>', handler)
         entry.bind('<KP_Enter>', handler)
+        entry.bind('<FocusOut>', handler)
 
     def _commit_fields_from_event(self, _event=None):
         self._apply_fields(show_warning=True)
@@ -384,10 +429,40 @@ class _TrajectoryView:
         self._on_probe_map_settings_change()
         return "break"
 
+    def _select_probe_map_probe(self, _event=None):
+        label = self._probe_map_probe_label_var.get()
+        if label not in self._probe_map_combo.cget('values'):
+            return
+        self._probe_map_probe_var.set(label[4:])
+        self._on_probe_map_settings_change()
+
+    def _set_available_probes(self, count):
+        self._available_probe_count = max(0, int(count))
+        self._probe_map_combo.configure(values=tuple(f'imec{index}' for index in range(self._available_probe_count)))
+
+    def _refresh_available_probes(self):
+        if not self._active or self._probe_discovery_pending:
+            return
+        if self._probe_discovery_worker is None:
+            self._probe_discovery_worker = LatestWorker(self)
+        self._probe_discovery_pending = True
+        def discover():
+            client = SpikeGLXLiveClient(SpikeGLXConfig(ip=0, include_geometry=False, compute_diagnostics=False))
+            try:
+                return client.connect().probe_count
+            finally:
+                client.close()
+        def complete(count, error):
+            self._probe_discovery_pending = False
+            if error is not None:
+                if not self._probe_map_worker_running:
+                    self._probe_map_status_var.set(f'Could not list SpikeGLX probes: {error}')
+                return
+            self._set_available_probes(count)
+        self._probe_discovery_worker.submit('probes', discover, complete)
+
     def _commit_probe_map_redraw_from_event(self, _event=None):
-        if self._apply_probe_map_fields(show_warning=True):
-            self._on_save(self._motor_id, self._trajectory)
-            self._schedule_probe_map_overlay_draw()
+        self._on_probe_map_settings_change()
         return "break"
 
     def _load_anatomy(self):
@@ -436,6 +511,9 @@ class _TrajectoryView:
             probe_map_min_mv = self._trajectory.probe_map_min_mv
             probe_map_max_mv = self._trajectory.probe_map_max_mv
             probe_map_update_ms = self._trajectory.probe_map_update_ms
+            probe_map_smooth = self._trajectory.probe_map_smooth
+            probe_map_smoothing_um = self._trajectory.probe_map_smoothing_um
+            probe_width_px = self._trajectory.probe_width_px
             if not all(np.isfinite(float(variable.get())) for variable in (
                     self._x_var, self._y_var, self._z_var, self._ap_var,
                     self._ml_var, self._twist_var, self._offset_var, self._zoom_var)):
@@ -459,6 +537,9 @@ class _TrajectoryView:
                 probe_map_min_mv=probe_map_min_mv,
                 probe_map_max_mv=probe_map_max_mv,
                 probe_map_update_ms=probe_map_update_ms,
+                probe_map_smooth=probe_map_smooth,
+                probe_map_smoothing_um=probe_map_smoothing_um,
+                probe_width_px=probe_width_px,
             )
         except ValueError:
             if show_warning and not self._field_warning_active:
@@ -497,14 +578,35 @@ class _TrajectoryView:
                               (self._twist_var, 'twist_rotation'), (self._offset_var, 'perpendicular_offset')):
             variable.set(f'{getattr(self._trajectory, key):g}')
         self._zoom_var.set(self._trajectory.zoom)
+        self._probe_map_probe_label_var.set(f'imec{self._trajectory.probe_map_probe}')
+        for variable, key in ((self._probe_map_enabled_var, 'probe_map_enabled'),
+                              (self._probe_map_probe_var, 'probe_map_probe'),
+                              (self._probe_map_min_var, 'probe_map_min_mv'),
+                              (self._probe_map_max_var, 'probe_map_max_mv'),
+                              (self._probe_map_update_ms_var, 'probe_map_update_ms'),
+                              (self._probe_map_smooth_var, 'probe_map_smooth'),
+                              (self._probe_map_smoothing_var, 'probe_map_smoothing_um'),
+                              (self._probe_width_var, 'probe_width_px')):
+            value = getattr(self._trajectory, key)
+            variable.set(value if isinstance(value, bool) else f'{value:g}')
+        self._sync_probe_map_worker()
         self._render_all()
 
     def _on_probe_map_settings_change(self):
+        previous_width = self._trajectory.probe_width_px
         if not self._apply_probe_map_fields(show_warning=True):
             return
+        if previous_width != self._trajectory.probe_width_px:
+            self._redraw_inline_depth_lines()
         self._on_save(self._motor_id, self._trajectory)
+        self._sync_probe_map_worker()
+
+    def _sync_probe_map_worker(self):
         if self._trajectory.probe_map_enabled:
-            self._restart_probe_map_worker()
+            settings = (self._trajectory.probe_map_probe, self._trajectory.probe_map_update_ms)
+            if not self._probe_map_worker_running or settings != self._probe_map_worker_settings:
+                self._restart_probe_map_worker()
+            self._schedule_probe_map_overlay_draw()
         else:
             self._stop_probe_map_worker()
             self._probe_map_values_mv = []
@@ -521,6 +623,11 @@ class _TrajectoryView:
             self._probe_map_status_var.set("Probe map off")
             return
 
+        if self._available_probe_count is not None and self._trajectory.probe_map_probe >= self._available_probe_count:
+            self._probe_map_status_var.set(f'imec{self._trajectory.probe_map_probe} is unavailable. Choose an available probe.')
+            self._refresh_available_probes()
+            return
+
         self._probe_map_generation += 1
         generation = self._probe_map_generation
         stop_event = threading.Event()
@@ -530,10 +637,11 @@ class _TrajectoryView:
             f"Connecting to SpikeGLX filtered AP probe {self._trajectory.probe_map_probe}..."
         )
         update_interval = max(0.1, self._trajectory.probe_map_update_ms / 1000.0)
+        self._probe_map_worker_settings = (self._trajectory.probe_map_probe, self._trajectory.probe_map_update_ms)
         config = SpikeGLXConfig(
             ip=self._trajectory.probe_map_probe,
-            samples_per_fetch=300,
             prefer_filtered=True,
+            compute_diagnostics=False,
         )
         thread = threading.Thread(
             target=self._probe_map_worker_loop,
@@ -544,23 +652,43 @@ class _TrajectoryView:
 
     def _apply_probe_map_fields(self, show_warning: bool = True) -> bool:
         try:
-            self._trajectory.probe_map_enabled = bool(self._probe_map_enabled_var.get())
-            self._trajectory.probe_map_probe = max(0, int(self._probe_map_probe_var.get()))
-            self._trajectory.probe_map_min_mv = float(self._probe_map_min_var.get())
-            self._trajectory.probe_map_max_mv = float(self._probe_map_max_var.get())
-            self._trajectory.probe_map_update_ms = max(100, int(float(self._probe_map_update_ms_var.get())))
-        except ValueError:
+            enabled = bool(self._probe_map_enabled_var.get())
+            probe = max(0, int(self._probe_map_probe_var.get()))
+            minimum = float(self._probe_map_min_var.get())
+            maximum = float(self._probe_map_max_var.get())
+            interval = max(100, int(float(self._probe_map_update_ms_var.get())) // 100 * 100)
+            smooth = bool(self._probe_map_smooth_var.get())
+            smoothing_um = float(self._probe_map_smoothing_var.get())
+            probe_width = int(self._probe_width_var.get())
+            if not 6 <= probe_width <= 256:
+                raise ValueError('Probe width must be between 6 and 256 pixels.')
+            if not math.isfinite(smoothing_um) or not 10 <= smoothing_um <= 5000:
+                raise ValueError('Smoothing width must be between 10 and 5000 µm.')
+            if not math.isfinite(minimum) or not math.isfinite(maximum) or maximum <= minimum:
+                raise ValueError('Invalid amplitude range')
+        except (ValueError, OverflowError):
             if show_warning and not self._field_warning_active:
                 self._field_warning_active = True
                 try:
                     messagebox.showwarning(
                         "Invalid Probe Map",
-                        "Probe map fields must be numeric.",
+                        "Enter finite probe-map settings with maximum greater than minimum, "
+                        "smoothing width between 10 and 5000 µm, and probe width between 6 and 256 pixels.",
                         parent=self,
                     )
                 finally:
                     self._field_warning_active = False
             return False
+        self._trajectory.probe_map_enabled = enabled
+        self._trajectory.probe_map_probe = probe
+        self._probe_map_probe_label_var.set(f'imec{probe}')
+        self._trajectory.probe_map_min_mv = minimum
+        self._trajectory.probe_map_max_mv = maximum
+        self._trajectory.probe_map_update_ms = interval
+        self._trajectory.probe_map_smooth = smooth
+        self._trajectory.probe_map_smoothing_um = smoothing_um
+        self._trajectory.probe_width_px = probe_width
+        self._probe_map_update_ms_var.set(f'{interval:g}')
         return True
 
     def _stop_probe_map_worker(self):
@@ -580,8 +708,7 @@ class _TrajectoryView:
             client = SpikeGLXLiveClient(config)
             info = client.connect()
             self._probe_map_events.put(("connected", generation, info.probe_count))
-            while not stop_event.wait(update_interval):
-                snapshot = client.fetch_snapshot()
+            for snapshot in client.iter_heatmaps(stop_event, round(update_interval * 1000)):
                 self._probe_map_events.put(("snapshot", generation, snapshot))
         except SpikeGLXUnavailable as exc:
             self._probe_map_events.put(("error", generation, str(exc)))
@@ -600,15 +727,19 @@ class _TrajectoryView:
                 event = self._probe_map_events.get_nowait()
             except queue.Empty:
                 break
+            if event[1] != self._probe_map_generation:
+                continue
             if event[0] == "snapshot":
                 latest_snapshot = event
                 latest_snapshot_generation = event[1]
                 continue
+            if event[0] == 'error':
+                latest_snapshot = None
             self._handle_probe_map_event(event)
         if latest_snapshot is not None and latest_snapshot_generation == self._probe_map_generation:
             self._handle_probe_map_event(latest_snapshot)
         if self.winfo_exists():
-            self._probe_poll_job = self.after(100, self._poll_probe_map_events)
+            self._probe_poll_job = self.after(16, self._poll_probe_map_events)
 
     def _handle_probe_map_event(self, event: tuple):
         kind = event[0]
@@ -616,15 +747,21 @@ class _TrajectoryView:
         if generation != self._probe_map_generation:
             return
         if kind == "connected":
+            self._set_available_probes(event[2])
             self._probe_map_status_var.set(
                 f"SpikeGLX filtered AP probe {self._trajectory.probe_map_probe} connected"
             )
         elif kind == "snapshot":
             snapshot = event[2]
             depths = list(getattr(snapshot, "channel_depths_mm", []))
-            if depths != self._probe_map_depths_mm:
+            xs = list(getattr(snapshot, 'channel_x_mm', []))
+            shanks = list(getattr(snapshot, 'channel_shanks', []))
+            if (depths != self._probe_map_depths_mm or xs != self._probe_map_x_mm
+                    or shanks != self._probe_map_shanks):
                 self._clear_probe_map_overlay()
                 self._probe_map_depths_mm = depths
+                self._probe_map_x_mm = xs
+                self._probe_map_shanks = shanks
             self._probe_map_values_mv = list(snapshot.peak_to_peak_mv)
             self._probe_map_update_count += 1
             now = time.monotonic()
@@ -810,7 +947,6 @@ class _TrajectoryView:
         try:
             if self._trajectory.probe_location_set:
                 self._render_plane(2)
-                self._redraw_inline_depth_lines()
         except tk.TclError:
             return
 
@@ -852,7 +988,7 @@ class _TrajectoryView:
             )
         return tuple(float(s) for s in self._volume.shape)
 
-    def _draw_plane(self, axis: int, image_ref: tk.PhotoImage):
+    def _draw_plane(self, axis: int, image_ref: tk.PhotoImage, refresh_probe_map=True):
         canvas = self._canvases[axis]
         width = max(1, canvas.winfo_width())
         height = max(1, canvas.winfo_height())
@@ -863,9 +999,10 @@ class _TrajectoryView:
 
         canvas.delete("placeholder")
         canvas.delete("trajectory")
-        if axis in (0, 1):
-            canvas.delete("probe_map")
-            self._probe_map_items.pop(axis, None)
+        if axis in (0, 1) and refresh_probe_map:
+            layout_key = (id(image_ref), width, height, self._trajectory.probe_location_set)
+            if self._probe_map_layout_keys.get(axis) != layout_key:
+                self._schedule_probe_map_overlay_draw()
         if axis in self._image_items:
             canvas.itemconfigure(self._image_items[axis], image=image_ref)
             canvas.coords(self._image_items[axis], width / 2, height / 2)
@@ -885,6 +1022,9 @@ class _TrajectoryView:
             canvas.create_line(left, center_y, left + image_width, center_y, fill=color, width=1, tags=("trajectory",))
             self._draw_target_line(canvas, left, top, image_width, image_height, height_mm)
             self._draw_probe_line(canvas, axis, center_x, top, image_height, height_mm)
+            # Movement redraws the shank, but the last activity frame must
+            # remain intact until the next configured sampling-window update.
+            canvas.tag_raise('probe_map')
         else:
             canvas.create_line(left, center_y, left + image_width, center_y, fill=color, width=1, tags=("trajectory",))
             canvas.create_line(center_x, top, center_x, top + image_height, fill=color, width=1, tags=("trajectory",))
@@ -911,95 +1051,13 @@ class _TrajectoryView:
         if not self._trajectory.probe_location_set:
             return
         bottom_y = top + self._offset_to_image_y(image_height, height_mm, self._probe_depth_offset())
-        canvas.create_line(
-            center_x, top, center_x, bottom_y,
-            fill="#1f6fff", width=4, tags=("trajectory",)
-        )
-        self._draw_probe_map_overlay(canvas, axis, center_x, top, bottom_y, image_height, height_mm)
-
-    def _draw_probe_map_overlay(
-        self,
-        canvas: tk.Canvas,
-        axis: int,
-        center_x: float,
-        top: float,
-        bottom_y: float,
-        image_height: int,
-        height_mm: float,
-    ):
-        if not self._trajectory.probe_map_enabled or not self._probe_map_values_mv:
-            return
-        if bottom_y <= top:
-            return
-        map_min, map_max = self._probe_map_limits()
-        values = self._probe_map_values_mv
-        mm_to_pixels = image_height / max(float(height_mm), 1.0)
-        segment_height = self._probe_map_channel_pitch_mm * mm_to_pixels
-        if segment_height <= 0:
-            return
-        items = self._probe_map_items.setdefault(axis, {})
-        half_width = 5
-        visible_items = set()
-
-        if self._probe_map_depths_mm:
-            depths = self._probe_map_depths_mm
-            channel_height = max(1.0, segment_height)
-            for channel, value in enumerate(values[:len(depths)]):
-                y_center = bottom_y - (depths[channel] * mm_to_pixels)
-                if y_center < top or y_center > bottom_y:
-                    continue
-                y0 = max(top, y_center - channel_height / 2.0)
-                y1 = min(bottom_y, y_center + channel_height / 2.0)
-                item_key = channel
-                color = color_from_lut(self._probe_map_lut, value, map_min, map_max)
-                item = items.get(item_key)
-                if item is None:
-                    item = canvas.create_rectangle(
-                        center_x - half_width,
-                        y0,
-                        center_x + half_width,
-                        y1,
-                        fill=color,
-                        outline="",
-                        tags=("probe_map",),
-                    )
-                    items[item_key] = item
-                else:
-                    canvas.coords(item, center_x - half_width, y0, center_x + half_width, y1)
-                    canvas.itemconfigure(item, fill=color, state=tk.NORMAL)
-                visible_items.add(item_key)
-        else:
-            map_height = min(bottom_y - top, len(values) * segment_height)
-            row_count = max(1, int(round(map_height)))
-            for row_from_bottom in range(row_count):
-                channel = int(row_from_bottom / segment_height)
-                if channel >= len(values):
-                    break
-                y1 = bottom_y - row_from_bottom
-                y0 = bottom_y - row_from_bottom - 1
-                y0 = max(top, y0)
-                item_key = row_from_bottom
-                color = color_from_lut(self._probe_map_lut, values[channel], map_min, map_max)
-                item = items.get(item_key)
-                if item is None:
-                    item = canvas.create_rectangle(
-                        center_x - half_width,
-                        y0,
-                        center_x + half_width,
-                        y1,
-                        fill=color,
-                        outline="",
-                        tags=("probe_map",),
-                    )
-                    items[item_key] = item
-                else:
-                    canvas.coords(item, center_x - half_width, y0, center_x + half_width, y1)
-                    canvas.itemconfigure(item, fill=color, state=tk.NORMAL)
-                visible_items.add(item_key)
-
-        for item_key, item in list(items.items()):
-            if item_key not in visible_items:
-                canvas.itemconfigure(item, state=tk.HIDDEN)
+        if bottom_y > top:
+            canvas.create_polygon(*probe_body_points(center_x, top, bottom_y, self._trajectory.probe_width_px,
+                min(6., .4 * image_height / max(float(height_mm), 1.))),
+                fill='#b5b5b5', outline='#777777', tags=('trajectory', 'probe_body'))
+    def _probe_map_image(self, image_height, height_mm, bottom, colors):
+        return contact_activity_image(colors, self._probe_map_depths_mm, self._probe_map_x_mm,
+            self._probe_map_shanks, image_height, height_mm, bottom, self._probe_map_channel_pitch_mm)
 
     def _probe_map_limits(self) -> tuple[float, float]:
         try:
@@ -1012,20 +1070,64 @@ class _TrajectoryView:
             map_max = map_min + 1.0
         return map_min, map_max
 
+    def _smoothed_probe_activity(self):
+        geometry = (len(self._probe_map_values_mv), tuple(self._probe_map_depths_mm),
+                    tuple(self._probe_map_shanks), self._trajectory.probe_map_smoothing_um)
+        if geometry != self._probe_smoothing_geometry:
+            self._probe_smoother = SpatialActivitySmoother(*geometry)
+            self._probe_smoothing_geometry = geometry
+            self._probe_smoothed_key = None
+        key = tuple(self._probe_map_values_mv)
+        if key != self._probe_smoothed_key:
+            self._probe_smoothed_profiles = self._probe_smoother.smooth(key)
+            self._probe_smoothed_key = key
+        return self._probe_smoothed_profiles
+
     def _redraw_probe_map_overlay_only(self):
-        """Update only the lightweight probe-map overlay, not the MRI slices."""
+        """Build both overlays first, then present the same activity frame together."""
         self._probe_map_draw_job = None
+        if not self._active:
+            return
+        if not (self._trajectory.probe_map_enabled and self._trajectory.probe_location_set
+                and self._probe_map_values_mv):
+            self._clear_probe_map_overlay()
+            return
+        palette_key = (tuple(self._probe_map_values_mv), self._probe_map_limits())
+        if palette_key != self._probe_map_palette_key:
+            self._probe_map_colors = tuple(color_from_lut(self._probe_map_lut, value, *palette_key[1])
+                                           for value in palette_key[0])
+            self._probe_map_palette_key = palette_key
+        prepared = {}
+        profiles = self._smoothed_probe_activity() if self._trajectory.probe_map_smooth else None
+        offset = self._probe_depth_offset()
         for axis in (0, 1):
-            canvas = self._canvases.get(axis)
-            image_ref = self._image_refs.get(axis)
-            if not canvas or not image_ref:
+            canvas, image_ref = self._canvases.get(axis), self._image_refs.get(axis)
+            if canvas is None or image_ref is None or not canvas.winfo_exists():
                 continue
-            try:
-                if not canvas.winfo_exists():
-                    continue
-                self._draw_probe_map_for_axis(axis, canvas, image_ref)
-            except tk.TclError:
-                continue
+            image_height = image_ref.height()
+            height_mm = self._slice_geometry(axis)[4]
+            bottom = self._offset_to_image_y(image_height, height_mm, offset)
+            raster = self._probe_overlay_renderer.render(self._trajectory, self._probe_map_values_mv,
+                self._probe_map_depths_mm, self._probe_map_x_mm, self._probe_map_shanks,
+                image_height, height_mm, bottom, profiles=profiles, colors=self._probe_map_colors,
+                limits=self._probe_map_limits())
+            photo = ImageTk.PhotoImage(raster, master=self)
+            prepared[axis] = (photo, canvas.winfo_width() / 2 - raster.width / 2,
+                              (canvas.winfo_height() - image_height) / 2)
+        # No Tk event processing between swaps; all references are ready first.
+        previous_refs = self._probe_map_image_refs
+        self._probe_map_image_refs = {**previous_refs, **{axis: frame[0] for axis, frame in prepared.items()}}
+        for axis, (photo, x, y) in prepared.items():
+            canvas = self._canvases[axis]
+            self._probe_map_layout_keys[axis] = (id(self._image_refs[axis]), max(1, canvas.winfo_width()),
+                                                max(1, canvas.winfo_height()), self._trajectory.probe_location_set)
+            item = self._probe_map_items.get(axis)
+            if item is None:
+                self._probe_map_items[axis] = canvas.create_image(x, y, image=photo, anchor='nw', tags='probe_map')
+            else:
+                canvas.itemconfigure(item, image=photo)
+                canvas.coords(item, x, y)
+            canvas.tag_raise('probe_map')
 
     def _schedule_probe_map_overlay_draw(self):
         if not self._active:
@@ -1033,7 +1135,7 @@ class _TrajectoryView:
         if self._probe_map_draw_job is not None:
             return
         try:
-            self._probe_map_draw_job = self.after_idle(self._redraw_probe_map_overlay_only)
+            self._probe_map_draw_job = self.after(0, self._redraw_probe_map_overlay_only)
         except tk.TclError:
             self._probe_map_draw_job = None
 
@@ -1055,24 +1157,8 @@ class _TrajectoryView:
             except tk.TclError:
                 continue
         self._probe_map_items.clear()
-
-    def _draw_probe_map_for_axis(self, axis: int, canvas: tk.Canvas, image_ref: tk.PhotoImage):
-        if axis not in (0, 1):
-            return
-        if not self._trajectory.probe_location_set:
-            return
-
-        canvas_width = max(1, canvas.winfo_width())
-        canvas_height = max(1, canvas.winfo_height())
-        image_width = image_ref.width()
-        image_height = image_ref.height()
-        left = (canvas_width - image_width) / 2
-        top = (canvas_height - image_height) / 2
-        center_x = left + (image_width / 2)
-        _center, _horizontal, _vertical, _width_mm, height_mm = self._slice_geometry(axis)
-        bottom_y = top + self._offset_to_image_y(image_height, height_mm, self._probe_depth_offset())
-        self._draw_probe_map_overlay(canvas, axis, center_x, top, bottom_y, image_height, height_mm)
-        canvas.tag_raise("probe_map")
+        self._probe_map_image_refs.clear()
+        self._probe_map_layout_keys.clear()
 
     def _offset_to_image_y(self, image_height: int, height_mm: float, offset: float = None) -> float:
         half_height = max(float(height_mm) / 2.0, 1.0)
@@ -1133,7 +1219,7 @@ class _TrajectoryView:
             try:
                 if not image_ref or not canvas or not canvas.winfo_exists():
                     continue
-                self._draw_plane(axis, image_ref)
+                self._draw_plane(axis, image_ref, refresh_probe_map=False)
             except tk.TclError:
                 continue
 

@@ -1,9 +1,9 @@
 """Movement policy tests using plain models and a command recorder: no Tk/port."""
 import unittest
 
-from monkeydrive.models import InstructionStep, MotorState
-from monkeydrive.motion_controller import MotionController, MotionError, TargetMove
-from monkeydrive.protocol import SerialProtocol as P
+from opendrive.models import InstructionStep, MotorState
+from opendrive.motion_controller import MotionController, MotionError, TargetMove
+from opendrive.protocol import SerialProtocol as P
 
 
 class MotionControllerTests(unittest.TestCase):

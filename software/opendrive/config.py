@@ -1,15 +1,15 @@
-"""Configuration constants for MonkeyDrive."""
+"""Configuration constants for OpenDrive."""
 
 class Config:
-    """Global configuration parameters for the MonkeyDrive system."""
+    """Global configuration parameters for the OpenDrive system."""
 
     # Firmware compatibility contract; keep in sync with the matching sketch.
-    FIRMWARE_PRODUCT: str = "MonkeyDrive"
+    FIRMWARE_PRODUCT: str = "OpenDrive"
     FIRMWARE_VARIANT: str = "full"
     FIRMWARE_VERSION: str = "1.0.0"
     FIRMWARE_CHECK_TIMEOUT: float = 2.0
     FIRMWARE_QUERY_INTERVAL: float = 0.25
-    FIRMWARE_SKETCH: str = "firmware/monkeydrive_firmware/monkeydrive_firmware.ino"
+    FIRMWARE_SKETCH: str = "firmware/opendrive_firmware/opendrive_firmware.ino"
 
     # Serial communication
     BAUD_RATE: int = 115200
@@ -40,10 +40,10 @@ class Config:
     SERIAL_READ_INTERVAL: float = 0.02
 
     # Data persistence
-    DATA_FILE: str = "monkeydrive_state.json"
+    DATA_FILE: str = "opendrive_state.json"
 
     # GUI Layout
-    WINDOW_TITLE: str = "MonkeyDrive"
+    WINDOW_TITLE: str = "OpenDrive"
     DECIMAL_PLACES: int = 3
     ENTRY_WIDTH: int = 12
     MODE_TARGET: str = "target"

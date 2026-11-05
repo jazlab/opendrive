@@ -1,9 +1,9 @@
 /**
- * MonkeyDrive Console Firmware
+ * OpenDrive Console Firmware
  * 
  * Teensy 4.0 firmware for controlling up to 6 stepper motor microdrives.
  * 
- * Author: MonkeyDrive Project
+ * Author: OpenDrive Project
  * License: MIT
  */
 
@@ -15,7 +15,7 @@
 
 namespace Config {
     // Match the GUI compatibility constants; bump when this contract changes.
-    constexpr const char* FIRMWARE_PRODUCT = "MonkeyDrive";
+    constexpr const char* FIRMWARE_PRODUCT = "OpenDrive";
     constexpr const char* FIRMWARE_VARIANT = "full";
     constexpr const char* FIRMWARE_VERSION = "1.0.0";
     constexpr unsigned long SERIAL_BAUD = 115200;

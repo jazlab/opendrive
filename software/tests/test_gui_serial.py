@@ -1,5 +1,6 @@
 """Tk integration checks using simulated hardware and no saved-state writes."""
 import gc
+import json
 from contextlib import contextmanager
 from pathlib import Path
 import tempfile
@@ -10,11 +11,11 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, PropertyMock, patch
 
-from monkeydrive.config import Config
-from monkeydrive.configuration import read_config, validate_workspace, write_config
-from monkeydrive.models import InstructionStep
-from monkeydrive.protocol import SerialProtocol as P
-from monkeydrive_gui import MonkeyDriveApp
+from opendrive.config import Config
+from opendrive.configuration import read_config, validate_workspace, write_config
+from opendrive.models import InstructionStep
+from opendrive.protocol import SerialProtocol as P
+from opendrive_gui import OpenDriveApp
 from test_serial_manager import FakePort
 
 
@@ -29,15 +30,15 @@ class GuiSerialTests(unittest.TestCase):
         self.ports = []
         self.open_gate = None
         self.patches = [
-            patch.object(MonkeyDriveApp, '_load_state', lambda app: None),
-            patch.object(MonkeyDriveApp, '_save_state', lambda app: None),
-            patch('monkeydrive.serial_manager.SerialManager.list_ports', return_value=[]),
-            patch('monkeydrive.serial_manager.serial.Serial', side_effect=self.open_port),
-            patch('monkeydrive_gui.messagebox.showwarning'),
+            patch.object(OpenDriveApp, '_load_state', lambda app: None),
+            patch.object(OpenDriveApp, '_save_state', lambda app: None),
+            patch('opendrive.serial_manager.SerialManager.list_ports', return_value=[]),
+            patch('opendrive.serial_manager.serial.Serial', side_effect=self.open_port),
+            patch('opendrive_gui.messagebox.showwarning'),
         ]
         for p in self.patches:
             p.start()
-        self.app = MonkeyDriveApp()
+        self.app = OpenDriveApp()
         self.callback_errors = []
         self.app.root.report_callback_exception = lambda *error: self.callback_errors.append(error)
         self.app.root.withdraw()
@@ -85,6 +86,24 @@ class GuiSerialTests(unittest.TestCase):
         # trigger cyclic garbage collection from a background thread.
         self.app = None
         gc.collect()
+
+    def test_invalid_relative_position_warns_once_and_preserves_position(self):
+        app = self.app
+        state = app.motor_states[0]
+        state.absolute, state.relative, state.relative_zero_point = 10., 2., 8.
+        widgets = app.view.get_widgets(state.motor_id)
+        for text in ('!', '', 'nan', 'inf'):
+            with self.subTest(text=text):
+                widgets['relative_entry'].config(state='normal')
+                widgets['relative_var'].set(text)
+                # Opening a warning can trigger the entry's FocusOut binding.
+                with patch.object(app, '_safe_popup', side_effect=lambda *args: app._on_relative_confirm(state.motor_id)) as popup:
+                    app._on_relative_confirm(state.motor_id)
+                    popup.assert_called_once()
+                    self.assertEqual(popup.call_args.args[1], 'Invalid Input')
+                self.assertEqual((state.absolute, state.relative, state.relative_zero_point), (10., 2., 8.))
+                self.assertEqual(widgets['relative_var'].get(), '2.000')
+                self.assertEqual(str(widgets['relative_entry']['state']), 'readonly')
 
     def test_console_modes_keep_controls_visible_and_preserve_drive_state(self):
         app = self.app
@@ -262,11 +281,11 @@ class GuiSerialTests(unittest.TestCase):
         app = self.app
         self.assertNotIn('trajectory_button', app.view.motor_widgets[0])
         app._saved_anatomy_path = 'synthetic.nii'
-        with patch('monkeydrive_gui.JsonViewerProcess') as process:
+        with patch('opendrive_gui.JsonViewerProcess') as process:
             app._on_trajectory_summary()
             app._on_trajectory_click(1)
             self.assertEqual(process.call_count, 1)
-            self.assertEqual(process.call_args.args[0], 'monkeydrive.trajectories_process')
+            self.assertEqual(process.call_args.args[0], 'opendrive.trajectories_process')
             self.assertIn('--explorer-json', process.call_args.args[1])
             process.return_value.send.assert_called_with({'type': 'select_drive', 'motor_id': 1})
 
@@ -297,6 +316,26 @@ class GuiSerialTests(unittest.TestCase):
                 self.assertEqual((second.absolute, second.relative, second.relative_zero_point), (-2.5, 0, -2.5))
                 send.assert_not_called()
 
+    def test_probe_settings_are_reused_on_reopen_and_in_automatic_restore(self):
+        app = self.app
+        expected = dict(min_mv=.01, max_mv=.3, update_ms=1000,
+                        horizontal_pixels=24, vertical_pixels=7, spacing=2)
+        handle = Mock()
+        handle.is_running.return_value = False
+        handle.poll_events.return_value = [dict(type='view_settings', settings=expected), dict(type='closed')]
+        app._probe_summary_window = handle
+        with patch('opendrive_gui.JsonViewerProcess') as process:
+            app._on_probe_summary()
+            args = process.call_args.args[1]
+            self.assertEqual(json.loads(args[args.index('--settings-json') + 1]), expected)
+        app._probe_summary_window = None
+        self.assertEqual(app._workspace_snapshot()['probe_view_settings'], expected)
+        with tempfile.TemporaryDirectory() as folder, patch.object(app, '_get_data_path', return_value=Path(folder)/'state.json'):
+            self.patches[1].temp_original(app)
+            app._probe_view_settings = {}
+            self.patches[0].temp_original(app)
+            self.assertEqual(app._probe_view_settings, expected)
+
     def test_config_save_load_restores_workspace_and_existing_autosave(self):
         app = self.app
         app._add_motor()
@@ -312,10 +351,10 @@ class GuiSerialTests(unittest.TestCase):
         app._saved_anatomy_path = '/missing/subject.nii'
         app._on_notes_click(1)
         app._notes_windows[1]._text.insert('1.0', 'Unsaved note text')
-        with tempfile.TemporaryDirectory() as folder, patch('monkeydrive_gui.messagebox.showinfo'), \
-                patch('monkeydrive_gui.messagebox.showerror') as error:
+        with tempfile.TemporaryDirectory() as folder, patch('opendrive_gui.messagebox.showinfo'), \
+                patch('opendrive_gui.messagebox.showerror') as error:
             path = Path(folder) / 'config.json'
-            with patch('monkeydrive_gui.filedialog.asksaveasfilename', return_value=str(path)):
+            with patch('opendrive_gui.filedialog.asksaveasfilename', return_value=str(path)):
                 app._on_save_config()
                 self.pump_until(lambda: not app._config_busy)
             saved = read_config(path)
@@ -323,7 +362,7 @@ class GuiSerialTests(unittest.TestCase):
             app._motor_states[0].absolute = 20
             app._motor_states[0].trajectory.z = 90
             app._select_mode(Config.MODE_TARGET)
-            with patch('monkeydrive_gui.filedialog.askopenfilename', return_value=str(path)):
+            with patch('opendrive_gui.filedialog.askopenfilename', return_value=str(path)):
                 app._on_load_config()
                 self.pump_until(lambda: not app._config_busy)
             self.assertEqual(app._workspace_snapshot(), {**saved, 'step_speed': '0.01', 'step_size': '0.001'})
@@ -349,8 +388,8 @@ class GuiSerialTests(unittest.TestCase):
         port = self.ports[-1]
         workspace = app._workspace_snapshot()
         workspace['motor_states'][0].update(absolute=7.25, relative=7.25, is_running=True)
-        with tempfile.TemporaryDirectory() as folder, patch('monkeydrive_gui.messagebox.showinfo'), \
-                patch('monkeydrive_gui.messagebox.showerror') as error:
+        with tempfile.TemporaryDirectory() as folder, patch('opendrive_gui.messagebox.showinfo'), \
+                patch('opendrive_gui.messagebox.showerror') as error:
             path = Path(folder) / 'config.json'
             write_config(path, workspace)
             original_apply = app._apply_workspace
@@ -359,7 +398,7 @@ class GuiSerialTests(unittest.TestCase):
                 self.assertFalse(app.serial_manager.is_busy)
                 original_apply(data)
             with patch.object(app, '_apply_workspace', side_effect=apply), \
-                    patch('monkeydrive_gui.filedialog.askopenfilename', return_value=str(path)):
+                    patch('opendrive_gui.filedialog.askopenfilename', return_value=str(path)):
                 app._on_load_config()
                 self.pump_until(lambda: not app._config_busy)
             error.assert_not_called()
@@ -373,10 +412,10 @@ class GuiSerialTests(unittest.TestCase):
     def test_invalid_config_leaves_current_workspace_intact(self):
         app = self.app
         before = app._workspace_snapshot()
-        with tempfile.TemporaryDirectory() as folder, patch('monkeydrive_gui.messagebox.showerror') as error:
+        with tempfile.TemporaryDirectory() as folder, patch('opendrive_gui.messagebox.showerror') as error:
             path = Path(folder) / 'invalid.json'
-            path.write_text('{"format":"monkeydrive-config","version":99}', encoding='utf-8')
-            with patch('monkeydrive_gui.filedialog.askopenfilename', return_value=str(path)), \
+            path.write_text('{"format":"opendrive-config","version":99}', encoding='utf-8')
+            with patch('opendrive_gui.filedialog.askopenfilename', return_value=str(path)), \
                     patch.object(app.serial_manager, 'disconnect') as disconnect:
                 app._on_load_config()
                 self.pump_until(lambda: not app._config_busy)
@@ -391,7 +430,7 @@ class GuiSerialTests(unittest.TestCase):
         anatomy.is_running.return_value = trajectories.is_running.return_value = True
         anatomy.poll_events.return_value = trajectories.poll_events.return_value = []
         app._anatomy_window, app._trajectory_summary_window = anatomy, trajectories
-        with tempfile.TemporaryDirectory() as folder, patch('monkeydrive_gui.messagebox.showinfo'):
+        with tempfile.TemporaryDirectory() as folder, patch('opendrive_gui.messagebox.showinfo'):
             mri = Path(folder) / 'subject.nii'
             mri.touch()
             workspace = app._workspace_snapshot()
@@ -400,16 +439,16 @@ class GuiSerialTests(unittest.TestCase):
             workspace['explorer_state'] = dict(x=2, y=3, z=4)
             path = Path(folder) / 'config.json'
             write_config(path, workspace)
-            with patch('monkeydrive_gui.filedialog.askopenfilename', return_value=str(path)), \
-                    patch('monkeydrive_gui.JsonViewerProcess') as process:
+            with patch('opendrive_gui.filedialog.askopenfilename', return_value=str(path)), \
+                    patch('opendrive_gui.JsonViewerProcess') as process:
                 process.return_value.poll_events.return_value = []
                 app._on_load_config()
                 self.pump_until(lambda: not app._config_busy)
                 self.assertEqual(process.call_count, 2)
                 launches = {call.args[0]: call.args[1] for call in process.call_args_list}
-                self.assertIn(str(mri), launches['monkeydrive.anatomy_process'])
-                self.assertIn(str(mri), launches['monkeydrive.trajectories_process'])
-                self.assertIn('--explorer-json', launches['monkeydrive.trajectories_process'])
+                self.assertIn(str(mri), launches['opendrive.anatomy_process'])
+                self.assertIn(str(mri), launches['opendrive.trajectories_process'])
+                self.assertIn('--explorer-json', launches['opendrive.trajectories_process'])
                 trajectories.poll_events.reset_mock()
                 app._poll_viewer_processes()
             anatomy.close.assert_called_once()
@@ -420,11 +459,11 @@ class GuiSerialTests(unittest.TestCase):
 
     def test_failed_config_save_preserves_existing_file_and_reports_error(self):
         app = self.app
-        with tempfile.TemporaryDirectory() as folder, patch('monkeydrive_gui.messagebox.showerror') as error:
+        with tempfile.TemporaryDirectory() as folder, patch('opendrive_gui.messagebox.showerror') as error:
             path = Path(folder) / 'config.json'
             path.write_text('original', encoding='utf-8')
-            with patch('monkeydrive_gui.filedialog.asksaveasfilename', return_value=str(path)), \
-                    patch('monkeydrive_gui.write_config', side_effect=OSError('Disk full')):
+            with patch('opendrive_gui.filedialog.asksaveasfilename', return_value=str(path)), \
+                    patch('opendrive_gui.write_config', side_effect=OSError('Disk full')):
                 app._on_save_config()
                 self.pump_until(lambda: not app._config_busy)
             error.assert_called_once()
@@ -433,8 +472,8 @@ class GuiSerialTests(unittest.TestCase):
     def test_cancelled_config_dialogs_leave_workspace_intact(self):
         app = self.app
         before = app._workspace_snapshot()
-        with patch('monkeydrive_gui.filedialog.askopenfilename', return_value=''), \
-                patch('monkeydrive_gui.filedialog.asksaveasfilename', return_value=''):
+        with patch('opendrive_gui.filedialog.askopenfilename', return_value=''), \
+                patch('opendrive_gui.filedialog.asksaveasfilename', return_value=''):
             app._on_save_config()
             app._on_load_config()
         self.assertEqual(app._workspace_snapshot(), before)
@@ -449,9 +488,9 @@ class GuiSerialTests(unittest.TestCase):
             release.wait(2)
             return validate_workspace(workspace)
         ticks = []
-        with patch('monkeydrive_gui.read_config', side_effect=read), \
-                patch('monkeydrive_gui.filedialog.askopenfilename', return_value='config.json'), \
-                patch('monkeydrive_gui.messagebox.showinfo'):
+        with patch('opendrive_gui.read_config', side_effect=read), \
+                patch('opendrive_gui.filedialog.askopenfilename', return_value='config.json'), \
+                patch('opendrive_gui.messagebox.showinfo'):
             try:
                 app._on_load_config()
                 app.root.after(10, lambda: ticks.append(True))
@@ -890,7 +929,7 @@ class GuiSerialTests(unittest.TestCase):
         for reply in [None, (Config.FIRMWARE_PRODUCT, 'unsupported-variant', Config.FIRMWARE_VERSION)]:
             with self.subTest(reply=reply), patch.object(FakePort, 'firmware_reply', reply), \
                     patch.object(Config, 'FIRMWARE_CHECK_TIMEOUT', .12), \
-                    patch('monkeydrive_gui.messagebox.showwarning') as warning:
+                    patch('opendrive_gui.messagebox.showwarning') as warning:
                 self.app._on_connect()
                 self.pump_until(lambda: warning.called)
                 self.pump_until(lambda: not self.app.serial_manager.is_busy)

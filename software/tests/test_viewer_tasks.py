@@ -4,7 +4,7 @@ import threading
 import time
 import unittest
 
-from monkeydrive.viewer_tasks import LatestWorker, ViewerCommands
+from opendrive.viewer_tasks import LatestWorker, ViewerCommands
 
 
 class FakeWidget:

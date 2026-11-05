@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-MonkeyDrive GUI - Control interface for MonkeyDrive microdrive system.
+OpenDrive GUI - Control interface for OpenDrive microdrive system.
 
 This GUI allows users to control up to 6 stepper motor-driven microdrives
 for precise positioning of neural probes.
 
-Author: MonkeyDrive Project
+Author: OpenDrive Project
 License: MIT
 """
 
@@ -29,26 +29,27 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-from monkeydrive.config import Config
-from monkeydrive.console_view import ConsoleView
-from monkeydrive.console_shortcuts import ConsoleShortcuts
-from monkeydrive.configuration import atomic_write_json, read_config, write_config
-from monkeydrive.console_theme import ConsoleTheme as Theme
-from monkeydrive.dialogs import InstructionsWindow, NotesWindow, ProgramLoadWindow, SettingsWindow
-from monkeydrive.models import InstructionStep, MotorState, TrajectoryState
-from monkeydrive.motion_controller import MotionController, MotionError, TargetMove
-from monkeydrive.protocol import SerialProtocol
-from monkeydrive.serial_manager import SerialManager
-from monkeydrive.utils import format_mm
-from monkeydrive.viewer_process import JsonViewerProcess
-from monkeydrive.viewer_tasks import LatestWorker
+from opendrive.config import Config
+from opendrive.probe_view_settings import probe_view_settings
+from opendrive.console_view import ConsoleView
+from opendrive.console_shortcuts import ConsoleShortcuts
+from opendrive.configuration import atomic_write_json, read_config, write_config
+from opendrive.console_theme import ConsoleTheme as Theme
+from opendrive.dialogs import InstructionsWindow, NotesWindow, ProgramLoadWindow, SettingsWindow
+from opendrive.models import InstructionStep, MotorState, TrajectoryState
+from opendrive.motion_controller import MotionController, MotionError, TargetMove
+from opendrive.protocol import SerialProtocol
+from opendrive.serial_manager import SerialManager
+from opendrive.utils import format_mm
+from opendrive.viewer_process import JsonViewerProcess
+from opendrive.viewer_tasks import LatestWorker
 
 
 # =============================================================================
 # Main Application
 # =============================================================================
 
-class MonkeyDriveApp:
+class OpenDriveApp:
     """Coordinate drive state, controller commands, persistence, and viewers.
 
     ConsoleView owns presentation; ConsoleShortcuts owns keyboard gestures.
@@ -57,7 +58,7 @@ class MonkeyDriveApp:
     """
 
     def __init__(self):
-        """Initialize the MonkeyDrive application."""
+        """Initialize the OpenDrive application."""
         self._root = tk.Tk()
         self._root.title(Config.WINDOW_TITLE)
 
@@ -70,6 +71,7 @@ class MonkeyDriveApp:
         self._trajectory_roster = ()
         self._trajectory_summary_window: Optional[JsonViewerProcess] = None
         self._probe_summary_window: Optional[JsonViewerProcess] = None
+        self._probe_view_settings = probe_view_settings()
         self._saved_mode: str = Config.MODE_TARGET
         self._saved_compact_view = False
         self._saved_port: str = ""
@@ -355,7 +357,7 @@ class MonkeyDriveApp:
             return
 
         self._anatomy_window = JsonViewerProcess(
-            "monkeydrive.anatomy_process",
+            "opendrive.anatomy_process",
             [
                 "--initial-path", self._saved_anatomy_path,
                 "--orientation-actual", self._anatomy_orientation_actual,
@@ -512,6 +514,9 @@ class MonkeyDriveApp:
                 event_type = event.get("type")
                 if event_type == "pause_requested":
                     self._on_pause()
+                elif event_type == 'view_settings':
+                    self._probe_view_settings = probe_view_settings(event.get('settings'), fallback=self._probe_view_settings)
+                    self._save_state()
                 elif event_type in ("closed", "exited"):
                     self._probe_summary_window = None
                 elif event_type == "error":
@@ -661,17 +666,25 @@ class MonkeyDriveApp:
         if entry['state'] == 'readonly':
             return
 
+        invalid = False
         try:
             value = float(widgets['relative_var'].get())
+            if not math.isfinite(value):
+                raise ValueError('Position must be finite')
             state.relative = round(value, 3)
             state.relative_zero_point = state.absolute - state.relative
         except ValueError:
-            widgets['relative_var'].set(format_mm(state.relative))
+            invalid = True
 
         widgets['relative_var'].set(format_mm(state.relative))
 
         entry.config(state='readonly', readonlybackground=Theme.COLOR_READONLY_BG)
         self.view.apply_row_selection_style(widgets, state.is_selected)
+        if invalid:
+            self._safe_popup(
+                messagebox.showwarning, "Invalid Input",
+                f"Relative position must be a valid number in mm. See Motor {motor_id}."
+            )
 
     def _on_notes_click(self, motor_id: int):
         """Handle notes field click to open notes window."""
@@ -763,7 +776,7 @@ class MonkeyDriveApp:
             return
 
         handle = JsonViewerProcess(
-            "monkeydrive.trajectories_process",
+            "opendrive.trajectories_process",
             [
                 "--anatomy-path", self._saved_anatomy_path,
                 "--motor-states-json", json.dumps([state.to_dict() for state in self._motor_states]),
@@ -778,12 +791,14 @@ class MonkeyDriveApp:
 
     def _on_probe_summary(self):
         """Open the live SpikeGLX probe summary viewer."""
+        if self._probe_summary_window:
+            self._poll_viewer_processes()
         if self._probe_summary_window and self._probe_summary_window.is_running():
             self._probe_summary_window.send_focus()
             return
         self._probe_summary_window = JsonViewerProcess(
-            "monkeydrive.probe_summary_process",
-            [],
+            "opendrive.probe_summary_process",
+            ['--settings-json', json.dumps(self._probe_view_settings)],
             cwd=Path(__file__).parent,
         )
 
@@ -1108,7 +1123,7 @@ class MonkeyDriveApp:
                 title="Export Data",
                 defaultextension=".csv",
                 filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
-                initialfile=f"monkeydrive_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+                initialfile=f"opendrive_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
             )
 
             if not filepath:
@@ -1228,7 +1243,7 @@ class MonkeyDriveApp:
             title="Save Program",
             defaultextension=".csv",
             filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
-            initialfile=f"monkeydrive_program_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+            initialfile=f"opendrive_program_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
         )
         if not filepath:
             return
@@ -1424,6 +1439,7 @@ class MonkeyDriveApp:
             'backlash': round(self._backlash, 3),
             'anatomy_path': self._saved_anatomy_path,
             'explorer_state': dict(self._explorer_state),
+            'probe_view_settings': dict(self._probe_view_settings),
             'anatomy_orientation_actual': self._anatomy_orientation_actual,
             'anatomy_orientation_scanner': self._anatomy_orientation_scanner,
             'recent_programs': self._recent_programs[:10],
@@ -1451,8 +1467,8 @@ class MonkeyDriveApp:
         self.shortcuts.reset_step_key_state()
         path = self._safe_popup(
             filedialog.asksaveasfilename, 'Save Config', parent=self._root,
-            defaultextension='.json', filetypes=[('MonkeyDrive config', '*.json')],
-            initialfile=f'monkeydrive_config_{datetime.now():%Y%m%d_%H%M%S}.json')
+            defaultextension='.json', filetypes=[('OpenDrive config', '*.json')],
+            initialfile=f'opendrive_config_{datetime.now():%Y%m%d_%H%M%S}.json')
         if not path:
             return
         self._poll_viewer_processes()
@@ -1474,7 +1490,7 @@ class MonkeyDriveApp:
         self.shortcuts.reset_step_key_state()
         path = self._safe_popup(
             filedialog.askopenfilename, 'Load Config', parent=self._root,
-            filetypes=[('MonkeyDrive config', '*.json')])
+            filetypes=[('OpenDrive config', '*.json')])
         if not path:
             return
         self._config_loading = True
@@ -1543,6 +1559,7 @@ class MonkeyDriveApp:
         self._min_speed, self._max_speed, self._backlash = data['min_speed'], data['max_speed'], data['backlash']
         self._saved_anatomy_path = data['anatomy_path']
         self._explorer_state = data['explorer_state']
+        self._probe_view_settings = probe_view_settings(data.get('probe_view_settings'))
         self._anatomy_orientation_actual = data['anatomy_orientation_actual']
         self._anatomy_orientation_scanner = data['anatomy_orientation_scanner']
         self._recent_programs = data['recent_programs']
@@ -1565,6 +1582,8 @@ class MonkeyDriveApp:
         """Load state from JSON file."""
         try:
             path = self._get_data_path()
+            if not path.exists():
+                path = path.with_name('monkeydrive_state.json')  # Settings from before the rename.
             if path.exists():
                 with open(path, 'r', encoding='utf-8') as f:
                     data = json.load(f)
@@ -1598,6 +1617,7 @@ class MonkeyDriveApp:
                 self._backlash = round(float(data.get('backlash', Config.DEFAULT_BACKLASH_MM)), 3)
                 self._saved_anatomy_path = str(data.get('anatomy_path', ""))
                 explorer = data.get('explorer_state', {})
+                self._probe_view_settings = probe_view_settings(data.get('probe_view_settings'))
                 self._explorer_state = explorer if isinstance(explorer, dict) else {}
                 self._anatomy_orientation_actual = str(data.get('anatomy_orientation_actual', ""))
                 self._anatomy_orientation_scanner = str(data.get('anatomy_orientation_scanner', ""))
@@ -1685,8 +1705,8 @@ class MonkeyDriveApp:
 # =============================================================================
 
 def main():
-    """Main entry point for MonkeyDrive GUI."""
-    app = MonkeyDriveApp()
+    """Main entry point for OpenDrive GUI."""
+    app = OpenDriveApp()
     app.run()
 
 

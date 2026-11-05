@@ -6,7 +6,7 @@ import unittest
 import nibabel as nib
 import numpy as np
 
-from monkeydrive.anatomy import AnatomyLoader
+from opendrive.anatomy import AnatomyLoader
 
 
 class AnatomyFormatTests(unittest.TestCase):

@@ -6,7 +6,9 @@ __pycache__/
 .venv-conda/
 venv/
 
-# MonkeyDrive runtime files
+# OpenDrive runtime files
+opendrive_state.json
+opendrive_export_*.csv
 monkeydrive_state.json
 monkeydrive_export_*.csv
 

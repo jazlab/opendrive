@@ -8,9 +8,9 @@ from types import SimpleNamespace
 
 import numpy as np
 
-from monkeydrive.anatomy import AnatomyVolume, AnatomySliceRenderer
-from monkeydrive.trajectories_viewer import TrajectoriesViewer
-from monkeydrive.models import MotorState
+from opendrive.anatomy import AnatomyVolume, AnatomySliceRenderer
+from opendrive.trajectories_viewer import TrajectoriesViewer
+from opendrive.models import MotorState, TrajectoryState
 from unittest.mock import patch
 
 
@@ -29,8 +29,10 @@ class ExplorerTests(unittest.TestCase):
         affine = np.eye(4)
         affine[:3, 3] = -16
         self.volume = AnatomyVolume(data, Path('synthetic.nii'), 'NIfTI', affine, (1, 1, 1))
-        self.loader = patch('monkeydrive.anatomy.AnatomyLoader.load', return_value=self.volume)
+        self.loader = patch('opendrive.anatomy.AnatomyLoader.load', return_value=self.volume)
         self.load = self.loader.start()
+        self.discovery = patch('opendrive.trajectory_viewer._TrajectoryView._refresh_available_probes')
+        self.discovery.start()
         self.viewer = TrajectoriesViewer(self.root, [MotorState(1), MotorState(3)], 'synthetic.nii',
             on_explorer_change=self.saved.append,
             on_assign=lambda drive, state: self.assignments.append((drive, state)))
@@ -50,6 +52,7 @@ class ExplorerTests(unittest.TestCase):
         if not hasattr(self, 'viewer'):
             return
         self.loader.stop()
+        self.discovery.stop()
         self.root.update_idletasks()
         self.viewer.destroy()
         self.root.destroy()
@@ -95,7 +98,7 @@ class ExplorerTests(unittest.TestCase):
         self.assertEqual(self.explorer._trajectory.ap_rotation, -27.9)
 
     def test_oblique_scroll_is_perpendicular_to_the_rendered_plane(self):
-        from monkeydrive.anatomy import AnatomyOrientation
+        from opendrive.anatomy import AnatomyOrientation
         for orientation in ('', AnatomyOrientation.PRONE_HEAD_FIRST):
             self.explorer._orientation_actual_key = orientation
             self.explorer._orientation_scanner_key = AnatomyOrientation.SUPINE_HEAD_FIRST if orientation else ''
@@ -135,7 +138,7 @@ class ExplorerTests(unittest.TestCase):
         self.assertIsNotNone(self.explorer._render_job)
 
     def test_origin_and_angles_restore_without_touching_source_volume(self):
-        from monkeydrive.explorer_view import ExplorerView
+        from opendrive.explorer_view import ExplorerView
         state = dict(x=1.1, y=2.2, z=3.3, ap_rotation=4.4, ml_rotation=5.5, twist_rotation=6.6, zoom=1.5)
         restored = ExplorerView(self.viewer._notebook, self.viewer, state)
         original = self.volume.data.copy()
@@ -205,7 +208,7 @@ class ExplorerTests(unittest.TestCase):
         self.assertEqual(detail._z_var.get(), '7.5')
 
     def test_drive_roster_and_assignment_select_correct_tab(self):
-        from monkeydrive.models import TrajectoryState
+        from opendrive.models import TrajectoryState
         self.viewer.select_tab(3)
         self.viewer.set_motor_states([MotorState(1), MotorState(2)])
         self.root.update()
@@ -278,6 +281,41 @@ class ExplorerTests(unittest.TestCase):
         for axis in range(3):
             self.assertIs(self.explorer._source_images[axis], sources[axis])
             self.assertEqual(self.explorer._image_refs[axis].width(), round(sources[axis].width * 1.1))
+
+    def test_motor_state_sent_before_settings_ack_does_not_reset_update_interval(self):
+        viewer = self.viewer
+        viewer.select_tab(1)
+        panel = viewer._panels[1]
+        stale = MotorState.from_dict(viewer._states[1].to_dict())
+        panel._probe_map_update_ms_var.set('1200')
+        panel._probe_map_smooth_var.set(True)
+        panel._probe_map_smoothing_var.set('250')
+        panel._commit_probe_map_restart_from_event()
+        self.assertIn(1, viewer._pending_probe_map_settings)
+        stale.absolute = 12
+        stale.is_running = True
+        viewer.update_motor_state(stale, revision=0)
+        self.assertEqual(panel._motor_position, 12)
+        self.assertEqual(panel._probe_map_update_ms_var.get(), '1200')
+        self.assertTrue(panel._probe_map_smooth_var.get())
+        self.assertEqual(panel._trajectory.probe_map_smoothing_um, 250)
+        self.assertEqual(viewer._states[1].trajectory.probe_map_update_ms, 1200)
+        viewer.set_motor_states([stale, MotorState(3)])
+        self.assertEqual(viewer._states[1].trajectory.probe_map_update_ms, 1200)
+        acknowledged = MotorState.from_dict(stale.to_dict())
+        acknowledged.trajectory.probe_map_update_ms = 1200
+        acknowledged.trajectory.probe_map_smooth = True
+        acknowledged.trajectory.probe_map_smoothing_um = 250
+        viewer.update_motor_state(acknowledged, revision=0)
+        self.assertNotIn(1, viewer._pending_probe_map_settings)
+
+    def test_new_assignment_revision_can_replace_pending_probe_settings(self):
+        viewer = self.viewer
+        edited = TrajectoryState(probe_map_update_ms=1200)
+        viewer._save_drive(1, edited)
+        viewer.apply_trajectory(1, TrajectoryState(probe_map_update_ms=900), revision=1)
+        self.assertEqual(viewer._states[1].trajectory.probe_map_update_ms, 900)
+        self.assertNotIn(1, viewer._pending_probe_map_settings)
 
     def test_hiding_discards_frame_in_flight(self):
         import threading

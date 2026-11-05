@@ -100,7 +100,7 @@ class SerialManager:
         session = _Session(port_name)
         self._session = session
         session.thread = threading.Thread(target=self._io_loop, args=(session,),
-                                          daemon=True, name="MonkeyDrive serial")
+                                          daemon=True, name="OpenDrive serial")
         session.thread.start()
         return True
 
@@ -256,7 +256,9 @@ class SerialManager:
                     if cmd == "FIRMWARE":
                         expected = [Config.FIRMWARE_PRODUCT, Config.FIRMWARE_VARIANT,
                                     Config.FIRMWARE_VERSION]
-                        if args != expected:
+                        # The rename does not change the controller protocol.
+                        legacy = ['MonkeyDrive', *expected[1:]]
+                        if args not in (expected, legacy):
                             with session.lock:
                                 self._fail_locked(session, self._firmware_warning(
                                     "Detected: " + ", ".join(args)[:160]), "firmware")

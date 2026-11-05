@@ -20,7 +20,8 @@ def _emit(message: dict):
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.parse_args()
+    parser.add_argument('--settings-json', default='{}')
+    args = parser.parse_args()
 
     commands: queue.Queue = queue.Queue()
 
@@ -43,19 +44,20 @@ def main() -> int:
         if closed:
             return
         closed = True
-        _emit({"type": "closed"})
         if viewer is not None:
             try:
                 viewer.destroy()
             except tk.TclError:
                 pass
+        _emit({"type": "closed"})
         try:
             root.destroy()
         except tk.TclError:
             pass
 
     try:
-        viewer = ProbeSummaryViewer(root)
+        viewer = ProbeSummaryViewer(root, initial_settings=json.loads(args.settings_json),
+            on_settings_change=lambda settings: _emit({'type': 'view_settings', 'settings': settings}))
         viewer.protocol("WM_DELETE_WINDOW", close)
         root.bind_all("<End>", lambda _event: (_emit({"type": "pause_requested"}), "break")[1])
 

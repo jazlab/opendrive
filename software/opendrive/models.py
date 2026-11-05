@@ -46,6 +46,9 @@ class TrajectoryState:
     probe_map_min_mv: float = 0.0
     probe_map_max_mv: float = 2.5
     probe_map_update_ms: int = 500
+    probe_map_smooth: bool = False
+    probe_map_smoothing_um: float = 150.0
+    probe_width_px: int = 24
     z: float = 0.0
 
     def to_dict(self) -> dict:
@@ -74,6 +77,9 @@ class TrajectoryState:
             probe_map_min_mv=float(data.get('probe_map_min_mv', 0.0)),
             probe_map_max_mv=float(data.get('probe_map_max_mv', 2.5)),
             probe_map_update_ms=int(data.get('probe_map_update_ms', 500)),
+            probe_map_smooth=bool(data.get('probe_map_smooth', False)),
+            probe_map_smoothing_um=float(data.get('probe_map_smoothing_um', 150.0)),
+            probe_width_px=int(data.get('probe_width_px', 24)),
         )
 
 @dataclass

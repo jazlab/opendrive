@@ -1,4 +1,4 @@
-# MonkeyDrive GUI Dependencies
+# OpenDrive GUI Dependencies
 
 # Serial communication
 pyserial>=3.5

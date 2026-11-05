@@ -6,9 +6,9 @@ from unittest.mock import patch
 
 import serial
 
-from monkeydrive.config import Config
-from monkeydrive.protocol import SerialProtocol as P
-from monkeydrive.serial_manager import SerialManager
+from opendrive.config import Config
+from opendrive.protocol import SerialProtocol as P
+from opendrive.serial_manager import SerialManager
 
 
 class FakePort:
@@ -96,7 +96,7 @@ class SerialReliabilityTests(unittest.TestCase):
         self.open_gate = None
         self.open_started = threading.Event()
         self.patches = [
-            patch('monkeydrive.serial_manager.serial.Serial', side_effect=self.open_port),
+            patch('opendrive.serial_manager.serial.Serial', side_effect=self.open_port),
             patch.object(Config, 'HEARTBEAT_INTERVAL', .04),
             patch.object(Config, 'HEARTBEAT_TIMEOUT', .3),
             patch.object(Config, 'GUI_WATCHDOG_TIMEOUT', .2),
@@ -151,6 +151,11 @@ class SerialReliabilityTests(unittest.TestCase):
         self.assertTrue(self.manager.connect('fake'))
         self.wait_for(lambda: self.manager.is_connected)
         return self.ports[-1]
+
+    def test_accepts_pre_rename_firmware_with_matching_variant_and_version(self):
+        with patch.object(FakePort, 'firmware_reply', ('MonkeyDrive', Config.FIRMWARE_VARIANT, Config.FIRMWARE_VERSION)):
+            self.connect()
+            self.assertTrue(self.manager.is_connected)
 
     def test_connection_waits_for_verified_firmware(self):
         with patch.object(FakePort, 'firmware_reply', None):

@@ -1,1 +1,0 @@
-"""MonkeyDrive GUI package."""

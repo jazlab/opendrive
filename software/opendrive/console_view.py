@@ -1,4 +1,4 @@
-"""Tk presentation for MonkeyDrive's full and compact consoles.
+"""Tk presentation for OpenDrive's full and compact consoles.
 
 ConsoleView owns widgets, Tk variables, styling, and layout. The application
 owns drive state and movement decisions. Button/field callbacks call the app
@@ -16,13 +16,13 @@ from .utils import format_mm
 
 
 if TYPE_CHECKING:
-    from monkeydrive_gui import MonkeyDriveApp
+    from opendrive_gui import OpenDriveApp
 
 
 class ConsoleView:
     """Two presentations of the same drive data and selection variables."""
 
-    def __init__(self, root: tk.Tk, app: 'MonkeyDriveApp'):
+    def __init__(self, root: tk.Tk, app: 'OpenDriveApp'):
         self.root = root
         self._app = app
         self.motor_widgets = []
@@ -113,7 +113,7 @@ class ConsoleView:
             if isinstance(widget, (tk.Tk, tk.Toplevel, tk.Frame)):
                 widget.configure(background=Theme.COLOR_BG)
             elif isinstance(widget, tk.Label):
-                if getattr(widget, "_monkeydrive_role", "") not in ("mode_tab", "motion_status"):
+                if getattr(widget, "_opendrive_role", "") not in ("mode_tab", "motion_status"):
                     widget.configure(background=Theme.COLOR_BG, foreground=Theme.COLOR_FG)
             elif isinstance(widget, tk.Checkbutton):
                 widget.configure(
@@ -132,7 +132,7 @@ class ConsoleView:
                     selectcolor=Theme.COLOR_ENTRY_BG,
                 )
             elif isinstance(widget, tk.Button):
-                role = getattr(widget, "_monkeydrive_role", "")
+                role = getattr(widget, "_opendrive_role", "")
                 if role == "mode":
                     pass
                 else:
@@ -201,7 +201,7 @@ class ConsoleView:
         header = tk.Frame(main)
         header.pack(fill=tk.X, pady=(0, 22))
         # Override the application-wide *Font option, which takes precedence over ttk styles.
-        ttk.Label(header, text="MonkeyDrive", style="Title.Console.TLabel",
+        ttk.Label(header, text="OpenDrive", style="Title.Console.TLabel",
                   font=(self.console_font.actual("family"), 26, "bold")).pack(side=tk.LEFT)
         self.build_port_selection(header)
         toolbar = tk.Frame(main)
@@ -234,7 +234,7 @@ class ConsoleView:
         self.compact_frame = tk.Frame(self.root, padx=12, pady=10)
         header = tk.Frame(self.compact_frame)
         header.pack(fill=tk.X, pady=(0, 4))
-        tk.Label(header, text='MonkeyDrive', font=(self.console_font.actual('family'), 13, 'bold')).pack(side=tk.LEFT)
+        tk.Label(header, text='OpenDrive', font=(self.console_font.actual('family'), 13, 'bold')).pack(side=tk.LEFT)
         ttk.Button(header, text='Expand', command=lambda: self.set_compact_view(False),
                    style='Console.TButton', width=7).pack(side=tk.RIGHT)
         status = tk.Frame(self.compact_frame)
@@ -548,7 +548,7 @@ class ConsoleView:
         widgets['motion_status'] = tk.Label(id_frame, text="Idle", width=10, anchor="center",
                                             font=(self.console_font.actual("family"), 11, "bold"),
                                             foreground="#626e7d", background=Theme.COLOR_BG)
-        widgets['motion_status']._monkeydrive_role = "motion_status"
+        widgets['motion_status']._opendrive_role = "motion_status"
         widgets['motion_status'].pack(side=tk.LEFT, padx=(8, 0))
 
         visible_widgets = [stripe, id_frame]

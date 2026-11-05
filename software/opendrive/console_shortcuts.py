@@ -12,13 +12,13 @@ from .config import Config
 from .motion_controller import MotionError
 
 if TYPE_CHECKING:
-    from monkeydrive_gui import MonkeyDriveApp
+    from opendrive_gui import OpenDriveApp
 
 
 class ConsoleShortcuts:
     """Route keys on Tk's thread without depending on the current selection."""
 
-    def __init__(self, root: tk.Tk, app: 'MonkeyDriveApp'):
+    def __init__(self, root: tk.Tk, app: 'OpenDriveApp'):
         self.root = root
         self._app = app
         self.active_step_key = None

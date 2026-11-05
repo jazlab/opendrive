@@ -1,6 +1,6 @@
-# Working on MonkeyDrive
+# Working on OpenDrive
 
-Start the application with `software/monkeydrive_gui.py`. It creates one Tk root
+Start the application with `software/opendrive_gui.py`. It creates one Tk root
 and connects the application, console view, keyboard controller, motion
 controller, and serial worker.
 
@@ -8,14 +8,14 @@ controller, and serial worker.
 
 | Responsibility | File |
 | --- | --- |
-| Tk event routing, program file dialogs, workspace loading, and viewer coordination | `software/monkeydrive_gui.py` — `MonkeyDriveApp` |
-| Full/compact layouts, widgets, Tk variables, styling, and numeric field navigation | `software/monkeydrive/console_view.py` — `ConsoleView` |
-| Enter shortcuts, drive-selection keys, held-key jogging, focus loss, and gesture timers | `software/monkeydrive/console_shortcuts.py` — `ConsoleShortcuts` |
-| Movement validation, Run/Step/Jog commands, pauses, transient destinations, and program progression | `software/monkeydrive/motion_controller.py` — `MotionController` |
-| Serial connection, command queue, heartbeats, and background device I/O | `software/monkeydrive/serial_manager.py` — `SerialManager` |
-| Serializable drive, trajectory, and program data | `software/monkeydrive/models.py` |
-| Config format, validation, and atomic file replacement | `software/monkeydrive/configuration.py` |
-| Controller-side command handling and step generation | `firmware/monkeydrive_firmware/monkeydrive_firmware.ino` |
+| Tk event routing, program file dialogs, workspace loading, and viewer coordination | `software/opendrive_gui.py` — `OpenDriveApp` |
+| Full/compact layouts, widgets, Tk variables, styling, and numeric field navigation | `software/opendrive/console_view.py` — `ConsoleView` |
+| Enter shortcuts, drive-selection keys, held-key jogging, focus loss, and gesture timers | `software/opendrive/console_shortcuts.py` — `ConsoleShortcuts` |
+| Movement validation, Run/Step/Jog commands, pauses, transient destinations, and program progression | `software/opendrive/motion_controller.py` — `MotionController` |
+| Serial connection, command queue, heartbeats, and background device I/O | `software/opendrive/serial_manager.py` — `SerialManager` |
+| Serializable drive, trajectory, and program data | `software/opendrive/models.py` |
+| Config format, validation, and atomic file replacement | `software/opendrive/configuration.py` |
+| Controller-side command handling and step generation | `firmware/opendrive_firmware/opendrive_firmware.ino` |
 
 `app.view` owns the console widgets. `app.shortcuts` owns keyboard gesture state.
 `app.motion` owns movement rules and the transient destinations used by running
@@ -33,7 +33,7 @@ same change as a structural refactor.
 
 For a target move:
 
-1. `ConsoleView` connects the **Run Selected** button to `MonkeyDriveApp._on_run`.
+1. `ConsoleView` connects the **Run Selected** button to `OpenDriveApp._on_run`.
 2. The application reads the selected drives and fields from the view, wraps
    them in `TargetMove` values, and calls `MotionController.run_targets`.
 3. The controller validates every selected drive before constructing any RUN
@@ -67,7 +67,7 @@ when changing keyboard handling.
 ### Firmware compatibility
 
 Before a connection becomes usable, the worker sends `GET_FIRMWARE` and requires
-a checksummed `FIRMWARE,MonkeyDrive,full,1.0.0` response, plus a heartbeat
+a checksummed `FIRMWARE,OpenDrive,full,1.0.0` response, plus a heartbeat
 acknowledgement. Queries are retried for up to two seconds. A mismatch or missing
 version closes the connection and queues a
 firmware warning for Tk; RUN, TARGET, and CONFIG cannot be queued during this check.

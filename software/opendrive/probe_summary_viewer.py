@@ -6,19 +6,26 @@ import queue
 import threading
 import time
 
+# Load on the GUI thread before starting SDK workers. A cold NumPy import in
+# a worker can contend with Tk's event loop during standalone viewer startup.
+import numpy  # noqa: F401
+
 import tkinter as tk
+from tkinter import ttk
 
 from .config import Config
 from .console_theme import ConsoleTheme as Theme
-from .viewer_theme import configure_viewer, style_viewer, viewer_button, viewer_heading
+from .viewer_theme import configure_viewer, style_viewer, viewer_button
 from .probe_map_colors import color_from_lut, load_shank_lut
+from .probe_map_layout import probe_map_layout
+from .probe_view_settings import probe_view_settings
 from .spikeglx_client import SpikeGLXConfig, SpikeGLXLiveClient, SpikeGLXUnavailable
 
 
 class ProbeSummaryViewer(tk.Toplevel):
     """Show one live probe map using the same data path as the trajectory viewer."""
 
-    def __init__(self, parent: tk.Tk):
+    def __init__(self, parent: tk.Tk, initial_settings=None, on_settings_change=None):
         super().__init__(parent)
         configure_viewer(self)
 
@@ -32,13 +39,21 @@ class ProbeSummaryViewer(tk.Toplevel):
         self._values_by_probe: dict[int, list[float]] = {}
         self._x_by_probe: dict[int, list[float]] = {}
         self._depths_by_probe: dict[int, list[float]] = {}
+        self._shanks_by_probe: dict[int, list[int]] = {}
         self._update_counts: dict[int, int] = {}
         self._last_status_time = 0.0
         self._lut = load_shank_lut()
 
-        self._min_var = tk.StringVar(value="0")
-        self._max_var = tk.StringVar(value="2.5")
-        self._update_ms_var = tk.StringVar(value="500")
+        self._current_settings = settings = probe_view_settings(initial_settings)
+        self._on_settings_change = on_settings_change
+        self._min_var = tk.StringVar(value=f"{settings['min_mv']:g}")
+        self._max_var = tk.StringVar(value=f"{settings['max_mv']:g}")
+        self._update_ms_var = tk.StringVar(value=str(settings['update_ms']))
+        self._layout_settings = tuple(settings[key] for key in ('horizontal_pixels', 'vertical_pixels', 'spacing'))
+        self._horizontal_pixels_var = tk.StringVar(value=str(settings['horizontal_pixels']))
+        self._vertical_pixels_var = tk.StringVar(value=str(settings['vertical_pixels']))
+        self._spacing_var = tk.StringVar(value=str(settings['spacing']))
+        self._view_settings_window = None
         self._status_var = tk.StringVar(value="Probe map off")
         self._data_label_var = tk.StringVar(value="")
 
@@ -57,6 +72,7 @@ class ProbeSummaryViewer(tk.Toplevel):
         self.after(150, self._restart)
 
     def destroy(self):
+        self._remember_settings()
         self._stop_worker()
         try:
             super().destroy()
@@ -64,42 +80,118 @@ class ProbeSummaryViewer(tk.Toplevel):
             pass
 
     def _build_ui(self):
-        container = tk.Frame(self, padx=20, pady=18)
+        container = tk.Frame(self)
         container.pack(fill=tk.BOTH, expand=True)
-        viewer_heading(container, 'Probe activity', 'Live SpikeGLX amplitude maps')
+        self._sidebar = tk.Frame(container, padx=14, pady=14)
+        self._sidebar.pack(side=tk.LEFT, fill=tk.Y)
+        self._add_field(self._sidebar, "Min mV", self._min_var, width=12)
+        self._add_field(self._sidebar, "Max mV", self._max_var, width=12)
+        self._add_field(self._sidebar, "Update ms", self._update_ms_var, width=12)
+        for label, command in (('Apply', self._apply_settings), ('Retry', self._restart),
+                               ('View Settings', self._on_view_settings)):
+            viewer_button(self._sidebar, text=label, command=command).pack(fill=tk.X, pady=(0, 8))
+        # Connection errors remain visible beside the controls without a footer
+        # or constantly changing status text taking space from the probe.
+        self._error_label = tk.Label(self._sidebar, textvariable=self._status_var,
+                                     wraplength=150, justify='left', anchor='w')
 
-        toolbar = tk.Frame(container)
-        toolbar.pack(fill=tk.X, pady=(0, 8))
-
-        self._add_field(toolbar, "Min mV:", self._min_var, width=7)
-        self._add_field(toolbar, "Max mV:", self._max_var, width=7)
-        self._add_field(toolbar, "Update ms:", self._update_ms_var, width=7)
-        viewer_button(toolbar, text="Apply", command=self._apply_settings, width=8).pack(side=tk.LEFT, padx=(6, 0))
-        viewer_button(toolbar, text="Retry", command=self._restart, width=8).pack(side=tk.LEFT, padx=(6, 0))
-
-        self._canvas = tk.Canvas(container, width=760, height=680, background="#dddddd", highlightthickness=0)
-        self._canvas.pack(fill=tk.BOTH, expand=True)
+        map_frame = tk.Frame(container)
+        map_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        map_frame.grid_rowconfigure(0, weight=1)
+        map_frame.grid_columnconfigure(0, weight=1)
+        self._canvas = tk.Canvas(map_frame, width=760, height=680, background="#dddddd",
+                                 highlightthickness=0, yscrollincrement=12)
+        self._canvas.grid(row=0, column=0, sticky='nsew')
+        scrollbar = ttk.Scrollbar(map_frame, orient=tk.VERTICAL, command=self._canvas.yview)
+        scrollbar.grid(row=0, column=1, sticky='ns')
+        self._canvas.configure(yscrollcommand=scrollbar.set)
+        horizontal_scrollbar = self._horizontal_scrollbar = ttk.Scrollbar(
+            map_frame, orient=tk.HORIZONTAL, command=self._canvas.xview)
+        horizontal_scrollbar.grid(row=1, column=0, sticky='ew')
+        self._canvas.configure(xscrollcommand=horizontal_scrollbar.set)
         self._canvas.create_text(140, 340, text="Waiting for data", fill="#333333", tags=("probe_map",))
         self._canvas.bind("<Configure>", lambda _event: self._draw_probe())
-
-        tk.Label(container, textvariable=self._data_label_var, anchor="w").pack(fill=tk.X, pady=(8, 0))
-        tk.Label(container, textvariable=self._status_var, anchor="w").pack(fill=tk.X, pady=(8, 0))
+        for event in ('<MouseWheel>', '<Button-4>', '<Button-5>'):
+            self._canvas.bind(event, self._scroll_map)
 
     def _add_field(self, parent: tk.Frame, label: str, variable: tk.StringVar, width: int):
-        tk.Label(parent, text=label).pack(side=tk.LEFT)
+        tk.Label(parent, text=label, anchor='w').pack(fill=tk.X, pady=(0, 4))
         entry = tk.Entry(parent, textvariable=variable, width=width)
-        entry.pack(side=tk.LEFT, padx=(4, 8))
+        entry.pack(fill=tk.X, pady=(0, 14))
         entry.bind("<Return>", lambda _event: (self._apply_settings(), "break")[1])
         entry.bind("<KP_Enter>", lambda _event: (self._apply_settings(), "break")[1])
 
+    def _apply_layout(self, _event=None):
+        variables = (self._horizontal_pixels_var, self._vertical_pixels_var, self._spacing_var)
+        try:
+            settings = tuple(int(variable.get()) for variable in variables)
+            if not all(1 <= value <= 256 for value in settings[:2]) or not 0 <= settings[2] <= 256:
+                raise ValueError
+        except ValueError:
+            for variable, value in zip(variables, self._layout_settings):
+                variable.set(str(value))
+            return 'break'
+        self._layout_settings = settings
+        self._remember_settings()
+        self._draw_probe()
+        return 'break'
+
+    def get_settings(self):
+        return probe_view_settings(dict(min_mv=self._min_var.get(), max_mv=self._max_var.get(),
+            update_ms=self._update_ms_var.get(), horizontal_pixels=self._horizontal_pixels_var.get(),
+            vertical_pixels=self._vertical_pixels_var.get(), spacing=self._spacing_var.get()),
+            fallback=self._current_settings)
+
+    def _remember_settings(self):
+        self._current_settings = self.get_settings()
+        if self._on_settings_change:
+            self._on_settings_change(dict(self._current_settings))
+
+    def _on_view_settings(self):
+        window = self._view_settings_window
+        if window is not None and window.winfo_exists():
+            window.lift()
+            window.focus_set()
+            return
+        window = self._view_settings_window = tk.Toplevel(self)
+        window.title('Probe View Settings')
+        window.transient(self)
+        window.resizable(False, False)
+        body = tk.Frame(window, padx=20, pady=18)
+        body.pack(fill=tk.BOTH, expand=True)
+        tk.Label(body, text='Channel appearance', font=self._viewer_section_font).grid(
+            row=0, column=0, columnspan=2, sticky='w', pady=(0, 12))
+        for row, (label, variable, minimum) in enumerate((
+                ('Horizontal pixels', self._horizontal_pixels_var, 1),
+                ('Vertical pixels', self._vertical_pixels_var, 1),
+                ('Spacing (pixels)', self._spacing_var, 0)), start=1):
+            tk.Label(body, text=label).grid(row=row, column=0, sticky='w', padx=(0, 18), pady=5)
+            entry = ttk.Spinbox(body, textvariable=variable, from_=minimum, to=256,
+                                width=6, command=self._apply_layout)
+            entry.grid(row=row, column=1, pady=5)
+            for event in ('<Return>', '<KP_Enter>', '<FocusOut>'):
+                entry.bind(event, self._apply_layout)
+        tk.Label(body, text='Use arrows, Enter, or Tab to update the map.', anchor='w').grid(
+            row=4, column=0, columnspan=2, pady=(12, 8), sticky='w')
+        def close():
+            self._apply_layout()
+            window.destroy()
+            self._view_settings_window = None
+        viewer_button(body, text='Done', command=close).grid(row=5, column=0, columnspan=2, sticky='e')
+        window.protocol('WM_DELETE_WINDOW', close)
+        style_viewer(self, window)
+
     def _apply_settings(self):
         update_ms = self._update_ms()
+        self._remember_settings()
         self._draw_probe()
         if self._worker_running and self._active_update_ms == update_ms:
             return
         self._restart()
 
     def _restart(self):
+        self._remember_settings()
+        self._error_label.pack_forget()
         self._stop_worker()
         self._start_worker()
 
@@ -107,6 +199,7 @@ class ProbeSummaryViewer(tk.Toplevel):
         self._values_by_probe = {}
         self._x_by_probe = {}
         self._depths_by_probe = {}
+        self._shanks_by_probe = {}
         self._update_counts = {}
         self._probe_count = 0
         self._started_probes = set()
@@ -130,12 +223,10 @@ class ProbeSummaryViewer(tk.Toplevel):
         update_interval = max(0.1, update_ms / 1000.0)
         config = SpikeGLXConfig(
             ip=probe,
-            samples_per_fetch=300,
             prefer_filtered=True,
             include_geometry=True,
             geometry_refresh_s=0.0,
             compute_diagnostics=False,
-            use_numpy=False,
         )
         thread = threading.Thread(
             target=self._worker_loop,
@@ -164,10 +255,7 @@ class ProbeSummaryViewer(tk.Toplevel):
             client = SpikeGLXLiveClient(config)
             info = client.connect()
             self._events.put(("connected", generation, config.ip, info.probe_count))
-            snapshot = client.fetch_snapshot()
-            self._events.put(("snapshot", generation, config.ip, snapshot))
-            while not stop_event.wait(update_interval):
-                snapshot = client.fetch_snapshot()
+            for snapshot in client.iter_heatmaps(stop_event, round(update_interval * 1000)):
                 self._events.put(("snapshot", generation, config.ip, snapshot))
         except SpikeGLXUnavailable as exc:
             self._events.put(("error", generation, config.ip, str(exc)))
@@ -185,9 +273,13 @@ class ProbeSummaryViewer(tk.Toplevel):
                 event = self._events.get_nowait()
             except queue.Empty:
                 break
+            if event[1] != self._generation:
+                continue
             if event[0] == "snapshot":
                 latest_snapshots[int(event[2])] = event
                 continue
+            if event[0] == 'error':
+                latest_snapshots.pop(int(event[2]), None)
             self._handle_event(event)
 
         drew_snapshot = False
@@ -199,7 +291,7 @@ class ProbeSummaryViewer(tk.Toplevel):
             self._update_data_label()
             self._draw_probe()
         if self.winfo_exists():
-            self.after(100, self._poll_events)
+            self.after(16, self._poll_events)
 
     def _handle_event(self, event: tuple, draw: bool = True):
         kind = event[0]
@@ -228,6 +320,7 @@ class ProbeSummaryViewer(tk.Toplevel):
                 self._x_by_probe[probe] = x_positions
             if depths:
                 self._depths_by_probe[probe] = depths
+            self._shanks_by_probe[probe] = list(getattr(snapshot, 'channel_shanks', []))
             self._update_counts[probe] = self._update_counts.get(probe, 0) + 1
             now = time.monotonic()
             if not values:
@@ -243,6 +336,7 @@ class ProbeSummaryViewer(tk.Toplevel):
             self._values_by_probe.pop(probe, None)
             self._data_label_var.set("")
             self._status_var.set(f"Probe {probe}: {event[3]}")
+            self._error_label.pack(fill=tk.X, pady=(8, 0))
             if draw:
                 self._draw_probe()
         elif kind == "done":
@@ -275,27 +369,39 @@ class ProbeSummaryViewer(tk.Toplevel):
                 (max(self._values_by_probe) + 1) if self._values_by_probe else 0,
             )
             column_width = width / probe_count
+            content_height = height
+            # Reserve each probe's natural width; scrolling handles overflow
+            # instead of clipping, shrinking pads, or overlapping other probes.
+            for probe in range(probe_count):
+                values = self._values_by_probe.get(probe, [])
+                bodies, _ = probe_map_layout(len(values), self._x_by_probe.get(probe, []),
+                    self._depths_by_probe.get(probe, []), self._shanks_by_probe.get(probe, []),
+                    0, 1, height, *self._layout_settings)
+                column_width = max(column_width, bodies[-1][2] - bodies[0][1] + 24)
             for probe in range(probe_count):
                 column_left = probe * column_width
                 column_right = column_left + column_width
                 values = self._values_by_probe.get(probe, [])
-                self._draw_probe_body(column_left, column_right, height, probe)
+                bodies, pads = probe_map_layout(len(values), self._x_by_probe.get(probe, []),
+                    self._depths_by_probe.get(probe, []), self._shanks_by_probe.get(probe, []),
+                    column_left, column_right, height, *self._layout_settings)
+                probe_bottom = max(body[4] for body in bodies)
+                for shank, left, right, top, bottom in bodies:
+                    center = (left + right) / 2
+                    self._canvas.create_polygon(left, top, right, top, right, bottom,
+                        center, bottom + 14, left, bottom, fill='#b5b5b5', outline='#777777',
+                        tags=('probe_map', 'shank'))
+                    content_height = max(content_height, bottom + 18)
                 if values:
-                    self._draw_vertical_heatmap(
-                        column_left,
-                        column_right,
-                        height,
-                        values,
-                        self._x_by_probe.get(probe, []),
-                        self._depths_by_probe.get(probe, []),
-                    )
-                    self._canvas.create_text(
-                        (column_left + column_right) / 2,
-                        16,
-                        text=f"P{probe}  {len(values)} ch",
-                        fill="#111111",
-                        tags=("probe_map",),
-                    )
+                    self._canvas.create_text((column_left + column_right) / 2, probe_bottom + 27,
+                        text=f'imec{probe}', fill='#333333', tags=('probe_map', 'probe_label'))
+                    content_height = max(content_height, probe_bottom + 40)
+                if values:
+                    map_min, map_max = self._color_limits()
+                    for channel, rectangle in pads:
+                        color = color_from_lut(self._lut, values[channel], map_min, map_max)
+                        self._canvas.create_rectangle(*rectangle, fill=color, outline='',
+                            tags=('probe_map', 'contact', f'probe_{probe}_channel_{channel}'))
                 else:
                     self._canvas.create_text(
                         (column_left + column_right) / 2,
@@ -306,6 +412,12 @@ class ProbeSummaryViewer(tk.Toplevel):
                         tags=("probe_map",),
                     )
 
+            content_width = max(width, column_width * probe_count)
+            self._canvas.configure(scrollregion=(0, 0, content_width, content_height))
+            if content_width > width:
+                self._horizontal_scrollbar.grid()
+            else:
+                self._horizontal_scrollbar.grid_remove()
             if not self._values_by_probe:
                 self._canvas.create_text(
                     width / 2,
@@ -317,108 +429,19 @@ class ProbeSummaryViewer(tk.Toplevel):
         except tk.TclError:
             return
 
-    def _draw_probe_body(self, column_left: float, column_right: float, height: int, probe: int):
-        column_width = max(1.0, column_right - column_left)
-        center_x = (column_left + column_right) / 2.0
-        body_width = min(120.0, max(54.0, column_width * 0.48))
-        top = 16.0
-        bottom = height - 34.0
-        left = center_x - body_width / 2.0
-        right = left + body_width
-        self._canvas.create_polygon(
-            left,
-            top,
-            right,
-            top,
-            right,
-            bottom,
-            center_x,
-            height - 10.0,
-            left,
-            bottom,
-            fill="#b5b5b5",
-            outline="#777777",
-            tags=("probe_map",),
-        )
-        self._canvas.create_line(left - 18, top + 5, right + 18, top + 5, fill="#777777", tags=("probe_map",))
-
-    def _draw_vertical_heatmap(
-        self,
-        column_left: float,
-        column_right: float,
-        height: int,
-        values: list[float],
-        x_positions: list[float],
-        depths: list[float],
-    ):
-        map_min, map_max = self._color_limits()
-        top = 34.0
-        bottom = height - 44.0
-        available_height = max(1.0, bottom - top)
-        column_width = max(1.0, column_right - column_left)
-        map_width = min(92.0, max(44.0, column_width * 0.44))
-        left = (column_left + column_right - map_width) / 2.0
-        right = left + map_width
-        x_values = x_positions[: len(values)] if len(x_positions) >= len(values) else []
-        depth_values = depths[: len(values)] if len(depths) >= len(values) else []
-        if x_values:
-            min_x = min(x_values)
-            max_x = max(x_values)
-            x_span = max(1e-9, max_x - min_x)
-        else:
-            min_x = 0.0
-            x_span = 1.0
-        if depth_values:
-            min_depth = min(depth_values)
-            max_depth = max(depth_values)
-            depth_span = max(1e-9, max_depth - min_depth)
-            channel_height = max(1.0, available_height / max(1, len(values)))
-        else:
-            row_height = max(1.0, available_height / max(1, len(values)))
-            channel_height = row_height
-        unique_x = sorted(set(round(value, 6) for value in x_values)) if x_values else []
-        if len(unique_x) > 1:
-            contact_width = min(18.0, max(5.0, map_width / (len(unique_x) * 1.8)))
-        else:
-            contact_width = map_width
-
-        for channel, value in enumerate(values):
-            if depth_values:
-                y_center = bottom - ((depth_values[channel] - min_depth) / depth_span) * available_height
-                y0 = max(top, y_center - channel_height / 2.0)
-                y1 = min(bottom, y_center + channel_height / 2.0)
-            else:
-                y1 = bottom - channel * row_height
-                y0 = max(top, y1 - row_height)
-                if y1 < top:
-                    break
-            if x_values:
-                x_center = left + ((x_values[channel] - min_x) / x_span) * (right - left)
-                x0 = max(left, x_center - contact_width / 2.0)
-                x1 = min(right, x_center + contact_width / 2.0)
-            else:
-                x0 = left
-                x1 = right
-            color = color_from_lut(self._lut, value, map_min, map_max)
-            self._canvas.create_rectangle(
-                x0,
-                y0,
-                x1,
-                y1,
-                fill=color,
-                outline=color,
-                tags=("probe_map",),
-            )
+    def _scroll_map(self, event):
+        delta = getattr(event, 'delta', 0)
+        number = getattr(event, 'num', None)
+        if delta or number in (4, 5):
+            direction = -1 if delta > 0 or number == 4 else 1
+            steps = max(1, abs(int(delta / 120))) if delta else 1
+            self._canvas.yview_scroll(direction * steps * 3, 'units')
+        return 'break'
 
     def _color_limits(self) -> tuple[float, float]:
-        try:
-            min_value = float(self._min_var.get())
-            max_value = float(self._max_var.get())
-        except ValueError:
-            min_value, max_value = 0.0, 2.5
-        if max_value <= min_value:
-            max_value = min_value + 1.0
-        return min_value, max_value
+        settings = probe_view_settings({'min_mv': self._min_var.get(), 'max_mv': self._max_var.get()},
+                                       fallback=self._current_settings)
+        return settings['min_mv'], settings['max_mv']
 
     def _probe(self) -> int:
         try:
@@ -428,9 +451,11 @@ class ProbeSummaryViewer(tk.Toplevel):
 
     def _update_ms(self) -> int:
         try:
-            return max(100, int(float(self._update_ms_var.get())))
-        except ValueError:
-            return 500
+            value = max(100, int(float(self._update_ms_var.get())) // 100 * 100)
+            self._update_ms_var.set(str(value))
+            return value
+        except (ValueError, OverflowError):
+            return self._current_settings['update_ms']
 
     def _style_widget_tree(self, widget=None):
         style_viewer(self, widget)
