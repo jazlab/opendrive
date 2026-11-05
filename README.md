@@ -1,22 +1,22 @@
-# MonkeyDrive
+# OpenDrive
 
-**MonkeyDrive: An open-source microdrive for primate neurophysiology**
+**OpenDrive: An open-source microdrive for primate neurophysiology**
 
-This repository contains the MonkeyDrive software and firmware. The MonkeyDrive system controls motorized microdrives for positioning neural probes during neuroscience experiments. Its desktop interface supports up to six drives, with tools for movement programs, MRI-based trajectory planning, and SpikeGLX integration.
+This repository contains the OpenDrive software and firmware. The OpenDrive system controls motorized microdrives for positioning neural probes during neuroscience experiments. Its desktop interface supports up to six drives, with tools for movement programs, MRI-based trajectory planning, and SpikeGLX integration.
 
 ## Project resources
 
-- [Project website](https://jazlab.github.io/monkeydrive/): overview of the MonkeyDrive system and project highlights.
+- [Project website](https://jazlab.github.io/monkeydrive/): overview of the OpenDrive system and project highlights.
 - **Paper**: write-up on the system design and validation.
 - [Paper reproducibility](https://github.com/jazlab/monkeydrive_paper): data and code to reproduce the figures in the paper.
-- [MonkeyDrive chatbot](https://notebook.google.com/notebook/b31beb9a-0dcf-4763-a446-20673b686bbd/preview): ask questions about building and using MonkeyDrive. Google sign-in required.
+- [OpenDrive chatbot](https://notebook.google.com/notebook/b31beb9a-0dcf-4763-a446-20673b686bbd/preview): ask questions about building and using OpenDrive. Google sign-in required.
 - [Documentation](https://docs.google.com/document/d/1CwdIq8lv9Gtcey1GMihnH131U_tzeRZlZ0cmyOJbvFY/edit?tab=t.0): user manuals, hardware files, assembly instructions, bill of materials, and quality testing.
 
 ## What you need
 
 - **For the desktop app:** Windows or macOS, Python 3.10 or newer with Tkinter,
   and Git to clone the repository.
-- **For motor control:** a MonkeyDrive control unit connected by USB, compatible
+- **For motor control:** an OpenDrive control unit connected by USB, compatible
   microdrives, and the matching firmware. The firmware in this repository targets
   a Teensy 4.0.
 - **For anatomy and trajectory viewing:** your MRI data as a NIfTI file
@@ -30,8 +30,8 @@ Clone the repository, then run the commands for your operating system from the
 repository folder.
 
 ```sh
-git clone https://github.com/jazlab/monkeydrive.git
-cd monkeydrive
+git clone https://github.com/jazlab/monkeydrive.git opendrive
+cd opendrive
 ```
 
 ### Windows — PowerShell
@@ -39,7 +39,7 @@ cd monkeydrive
 ```powershell
 py -3 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r software/requirements.txt
-.\.venv\Scripts\python.exe software/monkeydrive_gui.py
+.\.venv\Scripts\python.exe software/opendrive_gui.py
 ```
 
 ### macOS — Terminal
@@ -47,10 +47,10 @@ py -3 -m venv .venv
 ```sh
 python3 -m venv .venv
 .venv/bin/python -m pip install -r software/requirements.txt
-.venv/bin/python software/monkeydrive_gui.py
+.venv/bin/python software/opendrive_gui.py
 ```
 
-To open MonkeyDrive again, return to the repository folder and run the last
+To open OpenDrive again, return to the repository folder and run the last
 command for your operating system. No environment activation is required.
 
 If Python reports that `tkinter` or `_tkinter` is missing, use a Python
@@ -136,8 +136,8 @@ the overlays to guide movement.
 
 ## Saved settings and data
 
-MonkeyDrive automatically saves its workspace and settings to
-`software/monkeydrive_state.json`, including drive state, trajectories, and the
+OpenDrive automatically saves its workspace and settings to
+`software/opendrive_state.json`, including drive state, trajectories, and the
 last anatomy path. MRI files stay in their original location. The state file is
 local to your checkout and is excluded from Git.
 
@@ -159,7 +159,7 @@ of the drive data.
 ## Firmware and development
 
 If your controller is not already programmed, the firmware is in
-[`firmware/monkeydrive_firmware/monkeydrive_firmware.ino`](firmware/monkeydrive_firmware/monkeydrive_firmware.ino).
+[`firmware/opendrive_firmware/opendrive_firmware.ino`](firmware/opendrive_firmware/opendrive_firmware.ino).
 Open it in the Arduino IDE with Teensy support, select the matching board and
 port, and upload it. Confirm the pin assignments and motor configuration match
 your control unit before use.
@@ -176,14 +176,14 @@ step pulses and rejects new movement commands until heartbeats return. A returni
 heartbeat does not resume the interrupted movement; a new Run command is required.
 
 The desktop entry point is
-[`software/monkeydrive_gui.py`](software/monkeydrive_gui.py); supporting modules
-are in [`software/monkeydrive/`](software/monkeydrive/).
+[`software/opendrive_gui.py`](software/opendrive_gui.py); supporting modules
+are in [`software/opendrive/`](software/opendrive/).
 
 For the code layout, control flow, and test commands, see the
 [developer guide](docs/development.md).
 
 ## License
 
-The [MIT License](LICENSE) covers the MonkeyDrive project code in this repository,
+The [MIT License](LICENSE) covers the OpenDrive project code in this repository,
 including the GUI, firmware, and website source.
 Third-party dependencies and externally hosted assets retain their own licenses.
