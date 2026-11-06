@@ -9,9 +9,6 @@ venv/
 # OpenDrive runtime files
 opendrive_state.json
 opendrive_export_*.csv
-opendrive_state.json
-opendrive_export_*.csv
-# Pre-rename runtime files
 monkeydrive_state.json
 monkeydrive_export_*.csv
 
