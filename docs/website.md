@@ -1,7 +1,6 @@
 # Project website
 
-The project website is in `site/index.html`. Its image is embedded in the HTML;
-no build tool is required.
+The project website is in `site/index.html`; no build tool is required.
 
 ## Preview locally
 
@@ -16,7 +15,7 @@ font fallbacks work offline.
 
 ## Publish with GitHub Pages
 
-The website URL is `https://jazlab.github.io/monkeydrive/`. Publishing uses the
+The website URL is `https://jazlab.github.io/opendrive/`. Publishing uses the
 **Publish project website** GitHub Actions workflow and is started manually;
 pushing or merging changes does not deploy the site automatically.
 

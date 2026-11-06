@@ -1,14 +1,14 @@
 # OpenDrive
 
-**OpenDrive: An open-source microdrive for primate neurophysiology**
+**OpenDrive: An Open-Source MicroDrive for Large-Scale Neurophysiology**
 
 This repository contains the OpenDrive software and firmware. The OpenDrive system controls motorized microdrives for positioning neural probes during neuroscience experiments. Its desktop interface supports up to six drives, with tools for movement programs, MRI-based trajectory planning, and SpikeGLX integration.
 
 ## Project resources
 
-- [Project website](https://jazlab.github.io/monkeydrive/): overview of the OpenDrive system and project highlights.
+- [Project website](https://jazlab.github.io/opendrive/): overview of the OpenDrive system and project highlights.
 - **Paper**: write-up on the system design and validation.
-- [Paper reproducibility](https://github.com/jazlab/monkeydrive_paper): data and code to reproduce the figures in the paper.
+- [Paper reproducibility](https://github.com/jazlab/opendrive_paper): data and code to reproduce the figures in the paper.
 - [OpenDrive chatbot](https://notebook.google.com/notebook/b31beb9a-0dcf-4763-a446-20673b686bbd/preview): ask questions about building and using OpenDrive. Google sign-in required.
 - [Documentation](https://docs.google.com/document/d/1CwdIq8lv9Gtcey1GMihnH131U_tzeRZlZ0cmyOJbvFY/edit?tab=t.0): user manuals, hardware files, assembly instructions, bill of materials, and quality testing.
 
@@ -30,7 +30,7 @@ Clone the repository, then run the commands for your operating system from the
 repository folder.
 
 ```sh
-git clone https://github.com/jazlab/monkeydrive.git opendrive
+git clone https://github.com/jazlab/opendrive.git
 cd opendrive
 ```
 
@@ -181,6 +181,10 @@ are in [`software/opendrive/`](software/opendrive/).
 
 For the code layout, control flow, and test commands, see the
 [developer guide](docs/development.md).
+
+## Contact
+
+For questions about OpenDrive, contact [opendrive@mit.edu](mailto:opendrive@mit.edu).
 
 ## License
 
