@@ -1,6 +1,6 @@
 # OpenDrive
 
-**OpenDrive: An Open-Source MicroDrive for Large-Scale Neurophysiology**
+**OpenDrive: An Open-Source Microdrive for Large-Scale Neurophysiology**
 
 This repository contains the OpenDrive software and firmware. The OpenDrive system controls motorized microdrives for positioning neural probes during neuroscience experiments. Its desktop interface supports up to six drives, with tools for movement programs, MRI-based trajectory planning, and SpikeGLX integration.
 
