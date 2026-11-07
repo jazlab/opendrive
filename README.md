@@ -2,7 +2,7 @@
 
 **OpenDrive: An Open-Source Microdrive for Large-Scale Neurophysiology**
 
-This repository contains the OpenDrive software and firmware. The OpenDrive system controls motorized microdrives for positioning neural probes during neuroscience experiments. Its desktop interface supports up to six drives, with tools for movement programs, MRI-based trajectory planning, and SpikeGLX integration.
+This repository contains the OpenDrive software, firmware, and hardware files. The OpenDrive system controls motorized microdrives for positioning neural probes during neuroscience experiments. Its desktop interface supports up to six drives, with tools for movement programs, MRI-based trajectory planning, and SpikeGLX integration.
 
 ## Project resources
 
@@ -10,7 +10,11 @@ This repository contains the OpenDrive software and firmware. The OpenDrive syst
 - **Paper**: write-up on the system design and validation.
 - [Paper reproducibility](https://github.com/jazlab/opendrive_paper): data and code to reproduce the figures in the paper.
 - [OpenDrive chatbot](https://notebook.google.com/notebook/b31beb9a-0dcf-4763-a446-20673b686bbd/preview): ask questions about building and using OpenDrive. Google sign-in required.
-- [Documentation](https://docs.google.com/document/d/1CwdIq8lv9Gtcey1GMihnH131U_tzeRZlZ0cmyOJbvFY/edit?tab=t.0): user manuals, hardware files, assembly instructions, bill of materials, and quality testing.
+- [Documentation](https://docs.google.com/document/d/1CwdIq8lv9Gtcey1GMihnH131U_tzeRZlZ0cmyOJbvFY/edit?tab=t.0): user manuals, assembly instructions, bill of materials, and quality testing.
+
+## Hardware files
+
+Open [Releases](https://github.com/jazlab/opendrive/releases), select the hardware release, and download **opendrive-hardware.zip** under **Assets**. Assembly instructions and more system details are in the [documentation](https://docs.google.com/document/d/1CwdIq8lv9Gtcey1GMihnH131U_tzeRZlZ0cmyOJbvFY/edit).
 
 ## What you need
 
@@ -189,5 +193,6 @@ For questions about OpenDrive, contact [opendrive@mit.edu](mailto:opendrive@mit.
 ## License
 
 The [MIT License](LICENSE) covers the OpenDrive project code in this repository,
-including the GUI, firmware, and website source.
+including the GUI, firmware, and website source. Hardware files in the release
+are licensed under [CERN OHL v2 Permissive (CERN-OHL-P-2.0)](LICENSE-HARDWARE).
 Third-party dependencies and externally hosted assets retain their own licenses.
