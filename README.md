@@ -7,7 +7,7 @@ This repository contains the OpenDrive software, firmware, and hardware files. T
 ## Project resources
 
 - [Project website](https://jazlab.github.io/opendrive/): overview of the OpenDrive system and project highlights.
-- **Paper**: write-up on the system design and validation.
+- [Paper](https://www.biorxiv.org/content/10.64898/2026.11.09.764949v1): write-up on the system design and validation.
 - [Paper reproducibility](https://github.com/jazlab/opendrive_paper): data and code to reproduce the figures in the paper.
 - [OpenDrive chatbot](https://notebook.google.com/notebook/b31beb9a-0dcf-4763-a446-20673b686bbd/preview): ask questions about building and using OpenDrive. Google sign-in required.
 - [Documentation](https://docs.google.com/document/d/1CwdIq8lv9Gtcey1GMihnH131U_tzeRZlZ0cmyOJbvFY/edit?tab=t.0): user manuals, assembly instructions, bill of materials, and quality testing.
